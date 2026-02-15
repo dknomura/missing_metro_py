@@ -17,5 +17,4 @@ dependencies = [
 ]
 
 [tool.jupytext.formats]
-"notebooks/" = "ipynb"
-"scripts/" = "py:percent"
+formats = "ipynb,py:percent"
