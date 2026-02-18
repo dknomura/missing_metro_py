@@ -24,8 +24,9 @@ Unable to install ArcGIS py library, so getting the features from ArcGIS will be
 3. Make it a feature layer
 4. Share and make it public
 5. Open the layer URL, which should start with https://services3.arcgis.com/...
-6. Scroll down and click Support Operations => query
-7. 
+6. Select the layer
+7. Scroll down and click Support Operations => query
+8. Input "1=1" into where field, input "*" into out fields field, and change the format to GEOJSON
 
 If the notebook and .py file are not syncing, then use the [Jupytext VSCode Extension](https://marketplace.visualstudio.com/items?itemName=caenrigen.jupytext-sync) command to "Pair via Jupytext"
 
