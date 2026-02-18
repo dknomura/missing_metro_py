@@ -3,7 +3,7 @@ name = "missing-metro-py"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
     "folium>=0.20.0",
     "geopandas>=1.1.2",
@@ -13,7 +13,9 @@ dependencies = [
     "numpy>=2.4.2",
     "pandas>=3.0.0",
     "pre-commit>=4.5.1",
+    "requests>=2.32.5",
     "ruff>=0.15.1",
+    "setuptools>=82.0.0",
 ]
 
 [tool.jupytext.formats]
