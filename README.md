@@ -15,7 +15,9 @@ Jupytext is also used to help with version control, so .ipynb files are not adde
 
 ```bash
 # Generate notebook files
-uvx jupytext --to ipynb ./scripts/*.py
+uvx jupytext --to ipynb ./scripts/*/*.py
+# Generate py files
+uvx jupytext --to py ./scripts/*/*.ipynb
 ```
 
 Unable to install ArcGIS py library, so getting the features from ArcGIS will be done with http client (requests)

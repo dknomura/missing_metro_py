@@ -209,3 +209,5 @@ __marimo__/
 # Jupyter
 *.ipynb 
 data/
+
+.vscode/
