@@ -20,7 +20,7 @@ import geopandas as gpd
 import pandas as pd
 # %%
 # CITY_BOUNDARIES_URL = "https://services3.arcgis.com/NaFf4UaPo3IgQXqn/ArcGIS/rest/services/California_Cities_and_Identifiers_Blue_Version_view_1826470044727749789/FeatureServer/0/query?where=1%3D1&objectIds=&geometry=&geometryType=esriGeometryEnvelope&inSR=&spatialRel=esriSpatialRelIntersects&resultType=none&distance=0.0&units=esriSRUnit_Meter&outDistance=&relationParam=&returnGeodetic=false&outFields=*&returnGeometry=true&returnCentroid=false&returnEnvelope=false&featureEncoding=esriDefault&multipatchOption=xyFootprint&maxAllowableOffset=&geometryPrecision=&outSR=&defaultSR=&datumTransformation=&applyVCSProjection=false&returnIdsOnly=false&returnUniqueIdsOnly=false&returnCountOnly=false&returnExtentOnly=false&returnQueryGeometry=false&returnDistinctValues=false&cacheHint=false&collation=&orderByFields=&groupByFieldsForStatistics=&returnAggIds=false&outStatistics=&having=&resultOffset=&resultRecordCount=&returnZ=false&returnM=false&returnTrueCurves=false&returnExceededLimitFeatures=true&quantizationParameters=&sqlFormat=none&f=pgeojson&token="
-CITY_BOUNDARIES_URL = "California_Cities_and_Identifiers_Blue_Version_view_1826470044727749789.geojson"
+CITY_BOUNDARIES_URL = "../data/California_Cities_and_Identifiers_Blue_Version_view_1826470044727749789.geojson"
 # %%
 city_boundaries_gdf = gpd.read_file(CITY_BOUNDARIES_URL)
 # %%
@@ -44,14 +44,11 @@ folium.GeoJson(
     tooltip=folium.GeoJsonTooltip(fields=["CDTFA_CITY"], aliases=["City Name:"]),
 ).add_to(m)
 m
-#
 
 # %%
 
-prestops_gdf = gpd.read_file("California_Transit_Stops.geojson", driver="GeoJSON")
+prestops_gdf = gpd.read_file("../data/California_Transit_Stops.geojson", driver="GeoJSON")
 prestops_gdf['n_arrivals'] = prestops_gdf['n_arrivals'].astype(int)
-
-
 
 # %%
 Tier_1 = prestops_gdf[((prestops_gdf['routetypes'].str.contains("2")) & (prestops_gdf['n_arrivals']>=72)) | (prestops_gdf['routetypes'].str.contains("1"))]
@@ -67,21 +64,6 @@ list(zip(stops_df.geometry.y, stops_df.geometry.x))
 
 unique_values = stops_df['route_ids_served'].str.split(', ').explode().unique()
 unique_values
-# %%
-for route_id in unique_values:
-    filtered_df = stops_df[stops_df['route_ids_served'].str.contains(route_id)]
-    folium.PolyLine(
-        locations=list(zip(filtered_df.geometry.y, filtered_df.geometry.x)),
-        tooltip=folium.GeoJsonTooltip(fields=["route_ids_served"], aliases=["Route:"]),
-        ).add_to(m)
-m
-# %%
-folium.Marker(
-    locations=list(zip(stops_df.geometry.y, stops_df.geometry.x)),
-        tooltip=folium.GeoJsonTooltip(fields=["stop_name"], aliases=["Stop:"]),
-        ).add_to(m)
-m
-
 
 # %%
 for index, row in stops_df.iterrows():
@@ -89,8 +71,46 @@ for index, row in stops_df.iterrows():
         folium.Marker( 
             location=[row.geometry.y, row.geometry.x],
             popup=row['stop_name']
-            ).add_to(m)
+        ).add_to(m)
 m
 
 
+# %%
+shapes_gdf = gpd.read_file("../data/shapes.csv")
+shapes_gdf
+# %%
+# %%
+trips_gdf = gpd.read_file("../data/trips.csv")
+trips_gdf
+# %%
+# %%
+stops_df['route_id'] = stops_df['route_ids_served'].str.split(', ')
+export_trips = stops_df.explode('route_id')
+export_trips = export_trips.join(trips_gdf.set_index('route_id'), on='route_id', how='left', rsuffix='_trip')
+
+export_trips
+# %%
+select_boundaries_gdf
+# %%
+select_boundaries_gdf.to_file("../data/city_boundaries.geojson", driver="GeoJSON")
+stops_df.to_file("../data/stops.geojson", driver="GeoJSON")
+export_trips.to_csv("../data/export_trips.csv", index=False)
+# %%
+export_shapes = gpd.GeoDataFrame()
+shapes_gdf = shapes_gdf[shapes_gdf['shape_id'].isin(export_trips['shape_id'])]
+for shape_id in shapes_gdf['shape_id'].unique():
+    routes = export_trips[export_trips['shape_id'] == shape_id]['route_ids_served'].iloc[0]
+    shape_points = shapes_gdf[shapes_gdf['shape_id'] == shape_id]
+    shape_points = shape_points.sort_values(by='shape_pt_sequence')
+    shape_points['routes'] = routes
+    points = list(zip(pd.to_numeric(shape_points['shape_pt_lat']), pd.to_numeric(shape_points['shape_pt_lon'])))
+    export_shapes = pd.concat([export_shapes, shape_points])
+    # folium.PolyLine(points, color='blue', tooltip=f"Routes: {routes}").add_to(m)
+# m
+# %%
+gpd.GeoDataFrame(
+    export_shapes,
+    geometry=gpd.points_from_xy(export_shapes['shape_pt_lon'], export_shapes['shape_pt_lat']),
+    crs="EPSG:4326",
+).to_file("../data/export_shapes.geojson", driver="GeoJSON")
 # %%
