@@ -62,6 +62,8 @@ class NaSchTrafficModel:
         self.flow_history = []
         self.density_history = []
         self.average_velocity_history = []
+        self.lane_flow_history = []  # Per-lane flow over time
+        self.lane_density_history = []  # Per-lane density over time
         
     def _initialize_cars(self):
         """Initialize cars randomly on the road based on density."""
@@ -161,6 +163,7 @@ class NaSchTrafficModel:
         """
         new_road = np.zeros_like(self.road)
         cars_passed = 0
+        cars_passed_per_lane = [0] * self.num_lanes
         
         decisions = []
         
@@ -217,6 +220,7 @@ class NaSchTrafficModel:
             
             if new_position < old_position:
                 cars_passed += 1
+                cars_passed_per_lane[old_lane] += 1
             
             # Move car to new position
             new_road[new_lane, new_position, 0] = 1
@@ -233,12 +237,20 @@ class NaSchTrafficModel:
                     self.road[lane, 0, 1] = random.randint(0, self.max_velocity)
         
         # Update statistics
-        self._update_statistics(cars_passed)
+        self._update_statistics(cars_passed, cars_passed_per_lane)
         
         return cars_passed
     
-    def _update_statistics(self, cars_passed):
-        """Update flow, density, and average velocity statistics."""
+    def _update_statistics(self, cars_passed, cars_passed_per_lane=None):
+        """Update flow, density, and average velocity statistics.
+        
+        Flow is calculated using the fundamental relation: flow = density × velocity
+        This gives flow in veh/step/lane, which is a continuous value (not just integers).
+        
+        Args:
+            cars_passed: Total number of cars that passed the end of the road
+            cars_passed_per_lane: List of cars that passed per lane (veh/step)
+        """
         total_cars = np.sum(self.road[:, :, 0])
         current_density = total_cars / (self.num_lanes * self.road_length)
         
@@ -249,10 +261,31 @@ class NaSchTrafficModel:
         else:
             avg_velocity = 0
         
+        # Flow = density × avg_velocity (fundamental relation of traffic flow)
+        # This gives flow in veh/step/lane
+        current_flow = current_density * avg_velocity
+        
         # Store history
-        self.flow_history.append(cars_passed)
+        self.flow_history.append(current_flow)
         self.density_history.append(current_density)
         self.average_velocity_history.append(avg_velocity)
+        
+        # Track per-lane statistics
+        lane_densities = []
+        lane_flows = []
+        for lane in range(self.num_lanes):
+            lane_cars = np.sum(self.road[lane, :, 0])
+            lane_density = lane_cars / self.road_length
+            lane_densities.append(lane_density)
+            
+            # Per-lane flow = lane_density × avg velocity in that lane
+            lane_velocities = self.road[lane, :, 0] * self.road[lane, :, 1]
+            lane_total_vel = np.sum(lane_velocities)
+            lane_avg_vel = lane_total_vel / lane_cars if lane_cars > 0 else 0
+            lane_flows.append(lane_density * lane_avg_vel)
+        
+        self.lane_density_history.append(lane_densities)
+        self.lane_flow_history.append(lane_flows)
     
     def get_statistics(self):
         """Get current statistics."""
@@ -265,54 +298,65 @@ class NaSchTrafficModel:
 
 # %%
 class TrafficVisualizer:    
-    def __init__(self, model, figsize=(12, 8)):
+    def __init__(self, model, figsize=(14, 10)):
         self.model = model
-        self.fig, self.axes = plt.subplots(2, 2, figsize=figsize)
+        # Use GridSpec for custom layout: big road on top, 4 graphs below
+        self.fig = plt.figure(figsize=figsize)
+        gs = self.fig.add_gridspec(2, 1, height_ratios=[1.2, 1], hspace=0.3)
+        
+        # Top: Road visualization (tall)
+        self.ax_road = self.fig.add_subplot(gs[0, 0])
+        
+        # Bottom: 2x2 grid of graphs
+        gs_bottom = gs[1, 0].subgridspec(2, 2, hspace=0.5, wspace=0.3)
+        self.ax_velocity_dist = self.fig.add_subplot(gs_bottom[0, 0])
+        self.ax_avg_velocity = self.fig.add_subplot(gs_bottom[0, 1])
+        self.ax_lane_flow = self.fig.add_subplot(gs_bottom[1, 0])
+        self.ax_lane_density = self.fig.add_subplot(gs_bottom[1, 1])
+        
         self.frames = []
         self._setup_plots()
         
     def _setup_plots(self):
         """Set up the initial plot structure."""
-        # Plot 1: Road visualization
-        ax1 = self.axes[0, 0]
+        # Plot 1: Road visualization (big, top)
         self.road_display = np.zeros((self.model.num_lanes, self.model.road_length))
-        self.im = ax1.imshow(self.road_display, cmap='viridis', aspect='auto', 
-                            interpolation='nearest', vmin=0, vmax=self.model.max_velocity + 1)
-        ax1.set_title('Traffic Simulation')
-        ax1.set_xlabel('Position (cells)')
-        ax1.set_ylabel('Lane')
-        self.colorbar = plt.colorbar(self.im, ax=ax1, label='Velocity + 1')
+        self.im = self.ax_road.imshow(self.road_display, cmap='viridis', aspect='auto', 
+                                      interpolation='nearest', vmin=0, vmax=self.model.max_velocity + 1)
+        self.ax_road.set_title('Traffic Simulation')
+        self.ax_road.set_xlabel('Position (cells)')
+        self.ax_road.set_ylabel('Lane')
+        self.colorbar = plt.colorbar(self.im, ax=self.ax_road, label='Velocity + 1')
         
         # Plot 2: Velocity distribution
-        ax2 = self.axes[0, 1]
-        ax2.set_xlabel('Velocity (cells/timestep)')
-        ax2.set_ylabel('Number of cars')
-        ax2.set_title('Velocity Distribution')
-        ax2.set_xticks(range(self.model.max_velocity + 1))
-        self.vel_hist = None
+        self.ax_velocity_dist.set_xlabel('Velocity (cells/timestep)')
+        self.ax_velocity_dist.set_ylabel('Number of cars')
+        self.ax_velocity_dist.set_title('Velocity Distribution')
+        self.ax_velocity_dist.set_xticks(range(self.model.max_velocity + 1))
         
-        # Plot 3: Flow vs Density (fundamental diagram)
-        ax3 = self.axes[1, 0]
-        ax3.set_xlabel('Density (cars/cell)')
-        ax3.set_ylabel('Flow (cars/timestep)')
-        ax3.set_title('Fundamental Diagram')
-        ax3.grid(True, alpha=0.3)
-        self.fd_scatter = None
+        # Plot 3: Average velocity over time
+        self.ax_avg_velocity.set_xlabel('Time (timesteps)')
+        self.ax_avg_velocity.set_ylabel('Avg Velocity (cells/timestep)')
+        self.ax_avg_velocity.set_title('Average Velocity Over Time')
+        self.ax_avg_velocity.grid(True, alpha=0.3)
+        self.ax_avg_velocity.set_ylim(0, self.model.max_velocity)
         
-        # Plot 4: Average velocity over time
-        ax4 = self.axes[1, 1]
-        ax4.set_xlabel('Time (timesteps)')
-        ax4.set_ylabel('Average Velocity (cells/timestep)')
-        ax4.set_title('Average Velocity Over Time')
-        ax4.grid(True, alpha=0.3)
-        ax4.set_ylim(0, self.model.max_velocity)
-        self.vel_line, = ax4.plot([], [], 'b-', linewidth=2)
+        # Plot 4: Per-lane flow over time
+        self.ax_lane_flow.set_xlabel('Time (timesteps)')
+        self.ax_lane_flow.set_ylabel('Flow (veh/step)')
+        self.ax_lane_flow.set_title('Per-Lane Flow Over Time')
+        self.ax_lane_flow.grid(True, alpha=0.3)
         
-        plt.tight_layout()
+        # Plot 5: Per-lane density over time
+        self.ax_lane_density.set_xlabel('Time (timesteps)')
+        self.ax_lane_density.set_ylabel('Density (cars/cell)')
+        self.ax_lane_density.set_title('Per-Lane Density Over Time')
+        self.ax_lane_density.grid(True, alpha=0.3)
+        self.ax_lane_density.set_ylim(0, 1)
         
     def visualize_frame(self, frame_num):
         """Visualize a single frame of the simulation by updating plot data."""
-        # Update Plot 1: Road visualization
+        # Update Plot 1: Road visualization (big, top)
         self.road_display.fill(0)
         for lane in range(self.model.num_lanes):
             for pos in range(self.model.road_length):
@@ -320,48 +364,62 @@ class TrafficVisualizer:
                     velocity = self.model.road[lane, pos, 1]
                     self.road_display[lane, pos] = velocity + 1
         self.im.set_data(self.road_display)
-        self.axes[0, 0].set_title(f'Traffic Simulation (Frame {frame_num})')
+        self.ax_road.set_title(f'Traffic Simulation (Frame {frame_num})')
         
         # Update Plot 2: Velocity distribution
-        ax2 = self.axes[0, 1]
         velocities = []
         for lane in range(self.model.num_lanes):
             for pos in range(self.model.road_length):
                 if self.model.road[lane, pos, 0] == 1:
                     velocities.append(self.model.road[lane, pos, 1])
         
-        ax2.cla()
-        ax2.set_xlabel('Velocity (cells/timestep)')
-        ax2.set_ylabel('Number of cars')
-        ax2.set_title('Velocity Distribution')
-        ax2.set_xticks(range(self.model.max_velocity + 1))
+        self.ax_velocity_dist.cla()
+        self.ax_velocity_dist.set_xlabel('Velocity (cells/timestep)')
+        self.ax_velocity_dist.set_ylabel('Number of cars')
+        self.ax_velocity_dist.set_title('Velocity Distribution')
+        self.ax_velocity_dist.set_xticks(range(self.model.max_velocity + 1))
         if velocities:
-            ax2.hist(velocities, bins=range(self.model.max_velocity + 2), 
-                    alpha=0.7, edgecolor='black')
+            self.ax_velocity_dist.hist(velocities, bins=range(self.model.max_velocity + 2), 
+                                       alpha=0.7, edgecolor='black')
         
-        # Update Plot 3: Flow vs Density
-        ax3 = self.axes[1, 0]
-        ax3.cla()
-        ax3.set_xlabel('Density (cars/cell)')
-        ax3.set_ylabel('Flow (cars/timestep)')
-        ax3.set_title('Fundamental Diagram')
-        ax3.grid(True, alpha=0.3)
-        if len(self.model.flow_history) > 1:
-            ax3.scatter(self.model.density_history, self.model.flow_history, 
-                       alpha=0.5, s=10)
-        
-        # Update Plot 4: Average velocity over time
-        ax4 = self.axes[1, 1]
-        ax4.cla()
-        ax4.set_xlabel('Time (timesteps)')
-        ax4.set_ylabel('Average Velocity (cells/timestep)')
-        ax4.set_title('Average Velocity Over Time')
-        ax4.grid(True, alpha=0.3)
-        ax4.set_ylim(0, self.model.max_velocity)
+        # Update Plot 3: Average velocity over time
+        self.ax_avg_velocity.cla()
+        self.ax_avg_velocity.set_xlabel('Time (timesteps)')
+        self.ax_avg_velocity.set_ylabel('Avg Velocity (cells/timestep)')
+        self.ax_avg_velocity.set_title('Average Velocity Over Time')
+        self.ax_avg_velocity.grid(True, alpha=0.3)
+        self.ax_avg_velocity.set_ylim(0, self.model.max_velocity)
         if len(self.model.average_velocity_history) > 0:
-            ax4.plot(self.model.average_velocity_history, 'b-', linewidth=2)
+            self.ax_avg_velocity.plot(self.model.average_velocity_history, 'b-', linewidth=2)
         
-        plt.tight_layout()
+        # Update Plot 4: Per-lane flow over time
+        self.ax_lane_flow.cla()
+        self.ax_lane_flow.set_xlabel('Time (timesteps)')
+        self.ax_lane_flow.set_ylabel('Flow (veh/step)')
+        self.ax_lane_flow.set_title('Per-Lane Flow Over Time')
+        self.ax_lane_flow.grid(True, alpha=0.3)
+        if len(self.model.lane_flow_history) > 0:
+            colors = plt.cm.tab10(np.linspace(0, 1, self.model.num_lanes))
+            for lane in range(self.model.num_lanes):
+                lane_flow = [t[lane] for t in self.model.lane_flow_history]
+                self.ax_lane_flow.plot(lane_flow, color=colors[lane], linewidth=2, 
+                                       label=f'Lane {lane+1}')
+            self.ax_lane_flow.legend(fontsize=8)
+        
+        # Update Plot 5: Per-lane density over time
+        self.ax_lane_density.cla()
+        self.ax_lane_density.set_xlabel('Time (timesteps)')
+        self.ax_lane_density.set_ylabel('Density (cars/cell)')
+        self.ax_lane_density.set_title('Per-Lane Density Over Time')
+        self.ax_lane_density.grid(True, alpha=0.3)
+        self.ax_lane_density.set_ylim(0, 1)
+        if len(self.model.lane_density_history) > 0:
+            colors = plt.cm.tab10(np.linspace(0, 1, self.model.num_lanes))
+            for lane in range(self.model.num_lanes):
+                lane_density = [t[lane] for t in self.model.lane_density_history]
+                self.ax_lane_density.plot(lane_density, color=colors[lane], linewidth=2, 
+                                          label=f'Lane {lane+1}')
+            self.ax_lane_density.legend(fontsize=8)
         
         # Save rendered frame for animation
         import io
@@ -379,7 +437,7 @@ class TrafficVisualizer:
         
         from matplotlib.animation import ArtistAnimation
         # Create animation from saved frame images
-        anim_fig, anim_ax = plt.subplots(figsize=(12, 8))
+        anim_fig, anim_ax = plt.subplots(figsize=(14, 10))
         anim_ax.axis('off')
         artists = []
         for frame_array in self.frames:
@@ -505,11 +563,32 @@ def create_interactive_simulation():
             
             # Display statistics
             stats = model.get_statistics()
-            print(f"Simulation Statistics:")
-            print(f"  Total cars: {stats['total_cars']}")
-            print(f"  Current density: {stats['density']:.3f}")
-            print(f"  Average velocity: {stats['avg_velocity']:.2f}")
-            print(f"  Flow (last timestep): {stats['flow']}")
+            print(f"Simulation Statistics")
+            print(f"{'='*40}")
+            print(f"  Final state:")
+            print(f"    Total cars:     {stats['total_cars']}")
+            print(f"    Density:        {stats['density']:.3f} cars/cell")
+            print(f"    Avg velocity:   {stats['avg_velocity']:.2f} cells/step")
+            print(f"    Flow (last):    {stats['flow']:.3f} veh/step/ln")
+            
+            # Show history summary
+            if len(model.density_history) > 1:
+                print(f"\n  Over {len(model.density_history)} timesteps:")
+                print(f"    Density:        {min(model.density_history):.3f} min, {max(model.density_history):.3f} max, {np.mean(model.density_history):.3f} avg")
+                print(f"    Avg velocity:   {min(model.average_velocity_history):.2f} min, {max(model.average_velocity_history):.2f} max, {np.mean(model.average_velocity_history):.2f} avg")
+                print(f"    Flow:           {min(model.flow_history):.3f} min, {max(model.flow_history):.3f} max, {np.mean(model.flow_history):.3f} avg veh/step/ln")
+                
+                # Show a sample of timesteps (first 5 and last 5)
+                n = len(model.density_history)
+                print(f"\n  Timestep progression (first 5):")
+                print(f"    {'Step':>5} {'Density':>8} {'Velocity':>9} {'Flow':>8}")
+                print(f"    {'-'*33}")
+                for i in range(min(5, n)):
+                    print(f"    {i+1:>5} {model.density_history[i]:>8.3f} {model.average_velocity_history[i]:>9.2f} {model.flow_history[i]:>8.3f}")
+                if n > 10:
+                    print(f"    {'...':>5} {'...':>8} {'...':>9} {'...':>8}")
+                    for i in range(max(5, n-5), n):
+                        print(f"    {i+1:>5} {model.density_history[i]:>8.3f} {model.average_velocity_history[i]:>9.2f} {model.flow_history[i]:>8.3f}")
     
     def reset_simulation(button):
         """Reset the simulation output."""
