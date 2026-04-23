@@ -10,9 +10,7 @@
 # %%
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 import random
-from celluloid import Camera
 import ipywidgets as widgets
 from IPython.display import HTML, display, clear_output
 
@@ -21,7 +19,8 @@ from IPython.display import HTML, display, clear_output
 class NaSchTrafficModel:    
     def __init__(self, num_lanes=1, road_length=100, max_velocity=5, 
                  density=0.2, p_slow=0.3, p_lane_change=0.5, 
-                 p_slow_stopped=0.5, cell_length=7.5):
+                 p_slow_stopped=0.5, cell_length=7.5,
+                 entry_probability=0.0):
         """
         Initialize the traffic model.
         
@@ -42,6 +41,9 @@ class NaSchTrafficModel:
                 Probability of random slowing for stopped cars (default: 0.5)
             cell_length : float
                 Length of each cell in meters (default: 7.5)
+            entry_probability : float
+                Probability per timestep of a new car entering each lane at position 0
+                (default: 0.0). Set > 0 to vary density over time for fundamental diagram.
         """
         self.num_lanes = num_lanes
         self.road_length = road_length
@@ -51,6 +53,7 @@ class NaSchTrafficModel:
         self.p_lane_change = p_lane_change
         self.p_slow_stopped = p_slow_stopped
         self.cell_length = cell_length
+        self.entry_probability = entry_probability
         
         self.road = np.zeros((num_lanes, road_length, 2), dtype=int)
         
@@ -222,6 +225,13 @@ class NaSchTrafficModel:
         # Update road state
         self.road = new_road
         
+        # Add new cars at position 0 based on entry_probability
+        if self.entry_probability > 0:
+            for lane in range(self.num_lanes):
+                if self.road[lane, 0, 0] == 0 and random.random() < self.entry_probability:
+                    self.road[lane, 0, 0] = 1
+                    self.road[lane, 0, 1] = random.randint(0, self.max_velocity)
+        
         # Update statistics
         self._update_statistics(cars_passed)
         
@@ -258,30 +268,61 @@ class TrafficVisualizer:
     def __init__(self, model, figsize=(12, 8)):
         self.model = model
         self.fig, self.axes = plt.subplots(2, 2, figsize=figsize)
-        self.camera = Camera(self.fig)        
-    def visualize_frame(self, frame_num):
-        """Visualize a single frame of the simulation."""
-        for ax in self.axes.flat:
-            ax.clear()
+        self.frames = []
+        self._setup_plots()
         
+    def _setup_plots(self):
+        """Set up the initial plot structure."""
         # Plot 1: Road visualization
         ax1 = self.axes[0, 0]
-        road_display = np.zeros((self.model.num_lanes, self.model.road_length))
+        self.road_display = np.zeros((self.model.num_lanes, self.model.road_length))
+        self.im = ax1.imshow(self.road_display, cmap='viridis', aspect='auto', 
+                            interpolation='nearest', vmin=0, vmax=self.model.max_velocity + 1)
+        ax1.set_title('Traffic Simulation')
+        ax1.set_xlabel('Position (cells)')
+        ax1.set_ylabel('Lane')
+        self.colorbar = plt.colorbar(self.im, ax=ax1, label='Velocity + 1')
+        
+        # Plot 2: Velocity distribution
+        ax2 = self.axes[0, 1]
+        ax2.set_xlabel('Velocity (cells/timestep)')
+        ax2.set_ylabel('Number of cars')
+        ax2.set_title('Velocity Distribution')
+        ax2.set_xticks(range(self.model.max_velocity + 1))
+        self.vel_hist = None
+        
+        # Plot 3: Flow vs Density (fundamental diagram)
+        ax3 = self.axes[1, 0]
+        ax3.set_xlabel('Density (cars/cell)')
+        ax3.set_ylabel('Flow (cars/timestep)')
+        ax3.set_title('Fundamental Diagram')
+        ax3.grid(True, alpha=0.3)
+        self.fd_scatter = None
+        
+        # Plot 4: Average velocity over time
+        ax4 = self.axes[1, 1]
+        ax4.set_xlabel('Time (timesteps)')
+        ax4.set_ylabel('Average Velocity (cells/timestep)')
+        ax4.set_title('Average Velocity Over Time')
+        ax4.grid(True, alpha=0.3)
+        ax4.set_ylim(0, self.model.max_velocity)
+        self.vel_line, = ax4.plot([], [], 'b-', linewidth=2)
+        
+        plt.tight_layout()
+        
+    def visualize_frame(self, frame_num):
+        """Visualize a single frame of the simulation by updating plot data."""
+        # Update Plot 1: Road visualization
+        self.road_display.fill(0)
         for lane in range(self.model.num_lanes):
             for pos in range(self.model.road_length):
                 if self.model.road[lane, pos, 0] == 1:
-                    # Color by velocity
                     velocity = self.model.road[lane, pos, 1]
-                    road_display[lane, pos] = velocity + 1  # +1 to distinguish from empty
+                    self.road_display[lane, pos] = velocity + 1
+        self.im.set_data(self.road_display)
+        self.axes[0, 0].set_title(f'Traffic Simulation (Frame {frame_num})')
         
-        im = ax1.imshow(road_display, cmap='viridis', aspect='auto', 
-                       interpolation='nearest', vmin=0, vmax=self.model.max_velocity + 1)
-        ax1.set_title(f'Traffic Simulation (Frame {frame_num})')
-        ax1.set_xlabel('Position (cells)')
-        ax1.set_ylabel('Lane')
-        plt.colorbar(im, ax=ax1, label='Velocity + 1')
-        
-        # Plot 2: Velocity distribution
+        # Update Plot 2: Velocity distribution
         ax2 = self.axes[0, 1]
         velocities = []
         for lane in range(self.model.num_lanes):
@@ -289,41 +330,46 @@ class TrafficVisualizer:
                 if self.model.road[lane, pos, 0] == 1:
                     velocities.append(self.model.road[lane, pos, 1])
         
+        ax2.cla()
+        ax2.set_xlabel('Velocity (cells/timestep)')
+        ax2.set_ylabel('Number of cars')
+        ax2.set_title('Velocity Distribution')
+        ax2.set_xticks(range(self.model.max_velocity + 1))
         if velocities:
             ax2.hist(velocities, bins=range(self.model.max_velocity + 2), 
                     alpha=0.7, edgecolor='black')
-            ax2.set_xlabel('Velocity (cells/timestep)')
-            ax2.set_ylabel('Number of cars')
-            ax2.set_title('Velocity Distribution')
-            ax2.set_xticks(range(self.model.max_velocity + 1))
         
-        # Plot 3: Flow vs Density (fundamental diagram)
+        # Update Plot 3: Flow vs Density
         ax3 = self.axes[1, 0]
+        ax3.cla()
+        ax3.set_xlabel('Density (cars/cell)')
+        ax3.set_ylabel('Flow (cars/timestep)')
+        ax3.set_title('Fundamental Diagram')
+        ax3.grid(True, alpha=0.3)
         if len(self.model.flow_history) > 1:
             ax3.scatter(self.model.density_history, self.model.flow_history, 
                        alpha=0.5, s=10)
-            ax3.set_xlabel('Density (cars/cell)')
-            ax3.set_ylabel('Flow (cars/timestep)')
-            ax3.set_title('Fundamental Diagram')
-            ax3.grid(True, alpha=0.3)
         
-        # Plot 4: Average velocity over time
+        # Update Plot 4: Average velocity over time
         ax4 = self.axes[1, 1]
+        ax4.cla()
+        ax4.set_xlabel('Time (timesteps)')
+        ax4.set_ylabel('Average Velocity (cells/timestep)')
+        ax4.set_title('Average Velocity Over Time')
+        ax4.grid(True, alpha=0.3)
+        ax4.set_ylim(0, self.model.max_velocity)
         if len(self.model.average_velocity_history) > 0:
             ax4.plot(self.model.average_velocity_history, 'b-', linewidth=2)
-            ax4.set_xlabel('Time (timesteps)')
-            ax4.set_ylabel('Average Velocity (cells/timestep)')
-            ax4.set_title('Average Velocity Over Time')
-            ax4.grid(True, alpha=0.3)
-            ax4.set_ylim(0, self.model.max_velocity)
         
         plt.tight_layout()
-        if self.camera is not None:
-            self.camera.snap()
-        else:
-            # Save the current figure as an image in memory
-            self.fig.canvas.draw()
-            self.frames.append(self.fig.canvas.copy_from_bbox(self.fig.bbox))
+        
+        # Save rendered frame for animation
+        import io
+        from PIL import Image as PILImage
+        buf = io.BytesIO()
+        self.fig.savefig(buf, format='png', bbox_inches='tight')
+        buf.seek(0)
+        self.frames.append(np.array(PILImage.open(buf)))
     
     def create_animation(self, num_frames=100, interval=200):
         """Create and display animation."""
@@ -331,8 +377,14 @@ class TrafficVisualizer:
             self.model.update()
             self.visualize_frame(i)
         
-        animation = self.camera.animate(interval=interval)
-        plt.close()
+        from matplotlib.animation import ArtistAnimation
+        # Create animation from saved frame images
+        anim_fig, anim_ax = plt.subplots(figsize=(12, 8))
+        anim_ax.axis('off')
+        artists = []
+        for frame_array in self.frames:
+            artists.append([anim_ax.imshow(frame_array, animated=True)])
+        animation = ArtistAnimation(anim_fig, artists, interval=interval, blit=False)
         return animation
 
 # %%
@@ -380,6 +432,12 @@ def create_interactive_simulation():
         style={'description_width': 'initial'}
     )
     
+    entry_probability_slider = widgets.FloatSlider(
+        value=0.1, min=0.0, max=0.5, step=0.02,
+        description='Entry probability:',
+        style={'description_width': 'initial'}
+    )
+    
     num_frames_slider = widgets.IntSlider(
         value=100, min=10, max=500, step=10,
         description='Animation frames:',
@@ -405,6 +463,18 @@ def create_interactive_simulation():
         with output:
             clear_output(wait=True)
             
+            # Show loading indicator
+            loading_html = """
+            <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px;">
+                <div style="border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite;"></div>
+                <p style="margin-top: 16px; font-family: sans-serif; color: #555;">Generating simulation...</p>
+            </div>
+            <style>
+                @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+            </style>
+            """
+            display(HTML(loading_html))
+            
             # Create model with current parameters
             model = NaSchTrafficModel(
                 num_lanes=num_lanes_slider.value,
@@ -413,7 +483,8 @@ def create_interactive_simulation():
                 density=density_slider.value,
                 p_slow=p_slow_slider.value,
                 p_lane_change=p_lane_change_slider.value,
-                p_slow_stopped=p_slow_stopped_slider.value
+                p_slow_stopped=p_slow_stopped_slider.value,
+                entry_probability=entry_probability_slider.value
             )
             
             visualizer = TrafficVisualizer(model)
@@ -422,8 +493,15 @@ def create_interactive_simulation():
                 interval=200
             )
             
-            # Display animation
-            display(HTML(animation.to_jshtml()))
+            # Clear loading indicator and display animation
+            clear_output(wait=True)
+            
+            # Display animation - try to_jshtml first, fall back to to_html5_video
+            try:
+                display(HTML(animation.to_jshtml()))
+            except AttributeError:
+                # Fallback for non-interactive backends (e.g., Agg)
+                display(HTML(animation.to_html5_video()))
             
             # Display statistics
             stats = model.get_statistics()
@@ -453,6 +531,7 @@ def create_interactive_simulation():
         p_slow_slider,
         p_slow_stopped_slider,
         p_lane_change_slider,
+        entry_probability_slider,
         num_frames_slider,
         widgets.HBox([run_button, reset_button])
     ])
@@ -462,7 +541,6 @@ def create_interactive_simulation():
     with output:
         print("Adjust parameters above and click 'Run Simulation' to start.")
 
-create_interactive_simulation()
 # %%
 def run_demo():
     """Run a demo simulation with default parameters."""
@@ -491,12 +569,15 @@ def run_demo():
     visualizer = TrafficVisualizer(model)
     animation = visualizer.create_animation(num_frames=50, interval=200)
     
-    # Display animation
-    display(HTML(animation.to_jshtml()))
+    # Display animation - try to_jshtml first, fall back to to_html5_video
+    try:
+        display(HTML(animation.to_jshtml()))
+    except AttributeError:
+        # Fallback for non-interactive backends (e.g., Agg)
+        display(HTML(animation.to_html5_video()))
     
     return model, visualizer
 
-run_demo()
 # %%
 if __name__ == "__main__":
     # This allows the file to be run as a script
