@@ -5,7 +5,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 
-from cell_automata_hw import NaSchTrafficModel
+from scripts.traffic_eng.cell_automata import NaSchTrafficModel
 
 def test_basic_simulation():
     """Test basic simulation functionality."""
