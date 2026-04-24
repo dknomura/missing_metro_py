@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "celluloid>=0.2.0",
     "folium>=0.20.0",
     "geopandas>=1.1.2",
     "ipykernel>=7.2.0",

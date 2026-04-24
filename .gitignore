@@ -208,4 +208,6 @@ __marimo__/
 
 # Jupyter
 *.ipynb 
+!notebooks/*.ipynb
 data/
+.vscode/
