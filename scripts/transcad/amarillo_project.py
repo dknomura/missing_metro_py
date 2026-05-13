@@ -43,7 +43,7 @@ import caliperpy
 
 from transcad.constants import MODEL_DIR
 from transcad.caliper_4_step_model import build_network, run_attractions, run_balancing, run_cross_classification, run_skims
-from transcad.caliper_helpers import get_bottlenecks, get_dk, open_taz, view_bin
+from transcad.caliper_helpers import get_bottlenecks, get_dk, open_taz, view_mtx, view_bin
 from transcad.caliper_helpers import scale_taz_fields, sum_flow_field
 
 
@@ -61,10 +61,14 @@ taz_vw          = open_taz(dk)                          # open once
 prods_file, prod_vw = run_cross_classification(dk, taz_vw)
 run_attractions(dk, taz_vw)  
 pa = run_balancing(dk, taz_vw, prod_vw)  
-net_file = build_network(dk)                          # reuse same view
+net_file = build_network(dk)
+skim_file = run_skims(dk, net_file)
 # %%
 
-view_bin(dk, pa)
+# view_bin(dk, skim_file)
+view_mtx(dk, skim_file)
+
+# %%
 def run_intrazonal(dk: caliperpy.Gisdk, skim_file: str):
     """
     Distribution.Intrazonal — fill diagonal of skim matrix.

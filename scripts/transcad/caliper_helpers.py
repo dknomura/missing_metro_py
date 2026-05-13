@@ -1,10 +1,63 @@
 import os
 import shutil
 
+import numpy as np
 import pandas as pd
 import caliperpy
 from transcad.constants import MODEL_DIR
 
+def view_mtx(dk: caliperpy.Gisdk, path: str, core: str = None, rows: int = 10) -> "pd.DataFrame":
+    """
+    Read a TransCAD .mtx file into a pandas DataFrame.
+    
+    GISDK vectors must be converted with dk.VectorToArray(v) before
+    passing to list() or pandas — they are not Python iterables.
+    """
+    import pandas as pd
+
+    matrix     = dk.OpenMatrix(path, "True")
+    core_names = dk.GetMatrixCoreNames(matrix)
+    print(f"File : {path}")
+    print(f"Cores: {core_names}")
+
+    def vec_to_list(v):
+        """Convert a GISDK vector to a plain Python list."""
+        return dk.VectorToArray(v)
+
+    # ── Marginals-only mode (no core specified) ───────────────────────────
+    if core is None:
+        records = {}
+        for cname in core_names:
+            mc       = dk.CreateMatrixCurrency(matrix, cname, None, None, None)
+            row_sums = dk.GetMatrixVector(mc, [["Marginal", "Row Sum"]])
+            records[cname] = vec_to_list(row_sums)   # ← VectorToArray here
+        df = pd.DataFrame(records)
+        print(f"Shape: {len(df)} zones × {len(core_names)} cores (row sums)\n")
+        return df.head(rows)
+
+    # ── Full matrix mode for a single core ───────────────────────────────
+    if core not in core_names:
+        raise ValueError(f"Core '{core}' not found. Available: {core_names}")
+
+    mc      = dk.CreateMatrixCurrency(matrix, core, None, None, None)
+    row_ids = vec_to_list(dk.GetMatrixVector(mc, [["Index", "Row"]]))     # ←
+    col_ids = vec_to_list(dk.GetMatrixVector(mc, [["Index", "Column"]]))  # ←
+
+    row_data = {}
+    for rid in row_ids[:rows]:
+        row_vec          = dk.GetMatrixVector(mc, [["Row", rid]])
+        row_data[rid]    = vec_to_list(row_vec)                           # ←
+
+    df = pd.DataFrame(row_data, index=col_ids).T
+    df.index.name   = "Origin"
+    df.columns.name = "Destination"
+
+    total = sum(v for row in row_data.values()
+                for v in row if v is not None)
+    print(f"Core : '{core}'")
+    print(f"Shape: {len(row_ids)} × {len(col_ids)}")
+    print(f"Total (first {rows} rows): {total:,.1f}\n")
+    return df
 
 def scale_taz_fields(dk: caliperpy.Gisdk, taz_bin_path: str, fields: list, factor: float,
                      output_bin: str):

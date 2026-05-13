@@ -182,28 +182,37 @@ def build_network(dk, net_output: str = "My_Network.net") -> str:
 
 
 # %%
-def run_skims(dk: caliperpy.Gisdk, net_file: str, skim_output: str = "Script_Skim.mtx") -> str:
-    """
-    Network.Skims — all-pairs shortest path travel time matrix.
-    Docs: GISDK/api/networkskims.htm
-    """
+def run_skims(dk, net_file: str, skim_output: str = "My_Skim.mtx") -> str:
+    print("\n--- Step 2B: Skim Matrix ---")
+
     skim_file = os.path.join(MODEL_DIR, skim_output)
+    _delete_if_exists(skim_file)
+
     obj = dk.CreateObject("Network.Skims", None)
     obj.Network      = net_file
     obj.LayerDB      = os.path.join(MODEL_DIR, "network.dbd")
     obj.Origins      = "TAZ <> null"
     obj.Destinations = "TAZ <> null"
-    obj.Minimize     = "Time"
-    obj.AddSkimField(["Time", "All"])
+
+    # Minimize field must exactly match the Name used in AddLinkField()
+    # We used {"Name": "Time", "IsTimeField": True} in Network.Create
+    obj.Minimize = "Time"
+
+    # AddSkimField(arr) — positional array:
+    #   [0] = network field name (must match AddLinkField Name exactly)
+    #   [1] = skim type: "All" skims all links
+    # Pass as a dict instead — some caliperpy versions reject a bare list
+    obj.AddSkimField({"Field": "Time", "Type": "All"})
+
     obj.OutputMatrix({
         "MatrixFile":  skim_file,
         "Matrix":      "Shortest Path",
         "Compression": True,
     })
+
     ok = obj.Run()
     if not ok:
         raise RuntimeError("Network.Skims failed.")
+
     print(f"  Skim matrix → {skim_file}")
     return skim_file
-
-# Growth factor for Task 1B / Task 3 scenarios
