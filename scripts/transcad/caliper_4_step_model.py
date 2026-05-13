@@ -1,24 +1,31 @@
+import os
 import caliperpy
 from transcad.constants import MODEL_DIR
-from transcad.caliper_helpers import _delete_if_exists, add_field
+from transcad.caliper_helpers import _delete_if_exists, add_field, close_all_matrices, close_all_views
 
 
-import os
 def run_cross_classification(
         dk: caliperpy.Gisdk,
-        taz_file:     str  = "taz.dbd",
+        taz_vw:       str  = None,            # already-open TAZ view (required)
         output_file:  str  = "Script_Productions.bin",
         rates_table:  str  = "PRATES.BIN",
-        rates_fields_by_purpose: dict = {
+        rates_fields_by_purpose: dict = None,
+        segment_by_classification: dict = None):
+    """
+    Trip productions via cross-classification.
+    taz_vw must be passed — it is opened once in open_taz() and reused.
+    """
+    if rates_fields_by_purpose is None:
+        rates_fields_by_purpose = {
             "HBW_P":       "R_HBW_P",
             "HBNW_P":      "R_HBNW_P",
             "NHB_P":       "R_NHB_P",
             "TRUCKTAXI_P": "R_TRUCKTAXI_P",
-        },
-        segment_by_classification: dict = {"HH": ["HHSize", "INC"]}):
+        }
+    if segment_by_classification is None:
+        segment_by_classification = {"HH": ["HHSize", "INC"]}
 
     output_path = os.path.join(MODEL_DIR, output_file)
-
     _delete_if_exists(output_path)
 
     o = dk.CreateObject("Generation.CrossClass", None)
@@ -35,27 +42,32 @@ def run_cross_classification(
     if not ok:
         raise RuntimeError("Generation.CrossClass failed.")
 
-    # Don't use GetResults() for the view name — it returns a message tuple.
-    # Instead open the output file we already know the path of.
     prod_vw = dk.OpenTable("Productions", "FFB", [output_path, None])
     print(f"  Productions → {output_path}")
-    print(f"  Open view name: '{prod_vw}'")
+    print(f"  Productions view: '{prod_vw}'")
     return output_path, prod_vw
+
+
+def _rezero_field(dk, taz_vw, fld):
+    """Drop and re-add a field to guarantee null/zero values."""
+    struct = [list(s) for s in dk.GetTableStructure(
+                  taz_vw, {"Include Original": "True"})]
+    new_struct = [s for s in struct if s[0] != fld]
+    dk.ModifyTable(taz_vw, new_struct)
+    add_field(dk, taz_vw, fld, "Real", 12, 4)
 
 
 def run_attractions(dk: caliperpy.Gisdk, taz_vw: str):
     print("\n--- Step 1B: Trip Attractions ---")
-
     dk.SetView(taz_vw)
 
     field_names, _ = dk.GetFields(taz_vw, "All")
-    print(f"  Fields: {field_names}")
 
     def find_field(candidates):
         for c in candidates:
             if c in field_names:
                 return c
-        raise ValueError(f"None of {candidates} in {field_names}")
+        raise ValueError(f"None of {candidates} found in TAZ fields: {field_names}")
 
     hh_f  = find_field(["HH",      "HOUSEHOLDS", "HHS"])
     ret_f = find_field(["RETAIL",  "RET_EMP",    "RETEMP"])
@@ -63,15 +75,11 @@ def run_attractions(dk: caliperpy.Gisdk, taz_vw: str):
     svc_f = find_field(["SERVICE", "SERV_EMP",   "SVCEMP"])
     print(f"  Using: {hh_f}, {ret_f}, {bas_f}, {svc_f}")
 
-    existing, _ = dk.GetFields(taz_vw, "All")
-
     for fld in ["HBW_A", "HBNW_A", "NHB_A", "TRUCKTAXI_A"]:
-        add_field(dk, taz_vw, fld, "Real", 12, 4)
+        _rezero_field(dk, taz_vw, fld)
 
     independents = [f"{taz_vw}.{f}" for f in [hh_f, ret_f, bas_f, svc_f]]
-
-    # "viewname|" = all records of view, no selection set filter
-    zone_set = taz_vw + "|"
+    zone_set     = taz_vw + "|"
 
     purposes = {
         "HBW_A":       [0, 0.1033, 1.2321, 1.3089, 1.2341],
@@ -83,51 +91,71 @@ def run_attractions(dk: caliperpy.Gisdk, taz_vw: str):
     for dep_field, coeffs in purposes.items():
         print(f"  Computing {dep_field} ...")
         dk.ApplyLinearModel({
-            "Input":  {"Zone Set":     zone_set},       # "TAZ|" not "TAZ"
+            "Input":  {"Zone Set":     zone_set},
             "Global": {"Method":       "R",
                        "Coefficients": coeffs,
                        "Output to Report File": 0},
             "Field":  {"Dependent":    f"{taz_vw}.{dep_field}",
                        "Independents": independents},
         })
-        print(f"    {dep_field} OK")
+        v = dk.VectorToArray(dk.GetDataVector(taz_vw + "|", dep_field, None))
+        non_null = [x for x in v if x is not None]
+        print(f"    {dep_field}: n_nonzero={len(non_null)}  sum={sum(non_null):,.1f}")
 
     print("  Attractions done.")
 
 
 def run_balancing(dk: caliperpy.Gisdk, taz_vw: str, prod_vw: str,
-                  output_file: str = "ScriptPA.bin") -> str:
+                  output_file: str = "Script_PA.bin") -> str:
     """
-    Balance productions and attractions.
-    taz_vw:  open view of taz.bin  — has HBW_A, HBNW_A etc.
-    prod_vw: open view of Script_Productions.bin — has HBW_P, HBNW_P etc.
-
-    Generation.Balance needs a single joined view that has BOTH
-    the _P and _A fields visible together.
+    Balance P and A using Generation.Balance.
+    Joins taz_vw (_A fields) and prod_vw (_P fields) on TAZ ID.
+    Closes both views on completion — do not reuse them after this call.
     """
     print("\n--- Step 1C: Trip Balancing ---")
 
     pa_file = os.path.join(MODEL_DIR, output_file)
     _delete_if_exists(pa_file)
 
-    # Join the two open views on TAZ ID so Balance can see P and A together
-    joined = dk.JoinViews("TAZ+Productions", f"{taz_vw}.ID",
-                           f"{prod_vw}.ID", None)
+    # Find the correct join key — TAZ bins use "TAZ" not "ID"
+    taz_fields,  _ = dk.GetFields(taz_vw,  "All")
+    prod_fields, _ = dk.GetFields(prod_vw, "All")
+
+    def find_key(fields, candidates):
+        for c in candidates:
+            if c in fields:
+                return c
+        raise ValueError(f"No join key found. Tried {candidates}. Have: {fields}")
+
+    taz_key  = find_key(taz_fields,  ["TAZ", "ID", "ZoneID", "ZONE"])
+    prod_key = find_key(prod_fields, ["TAZ", "ID", "ZoneID", "ZONE"])
+    print(f"  Joining on {taz_vw}.{taz_key} ↔ {prod_vw}.{prod_key}")
+
+    joined = dk.JoinViews(
+        "TAZ+Productions",
+        f"{taz_vw}.{taz_key}",
+        f"{prod_vw}.{prod_key}",
+        None
+    )
+    if not joined:
+        raise RuntimeError("JoinViews failed — check view names and join key types.")
+    print(f"  Joined view: '{joined}'")
 
     obj = dk.CreateObject("Generation.Balance", None)
-    obj.AddDataSource({"ViewName": joined})
+    obj.AddDataSource({"ViewName": joined})   # ViewName for open view, not TableName
     obj.OutputFile = pa_file
 
-    obj.AddPurpose({"Production": "HBW_P",       "Attraction": "HBW_A",})
-    obj.AddPurpose({"Production": "HBNW_P",      "Attraction": "HBNW_A",})
-    obj.AddPurpose({"Production": "NHB_P",       "Attraction": "NHB_A",})
-    obj.AddPurpose({"Production": "TRUCKTAXI_P", "Attraction": "TRUCKTAXI_A",})
+    obj.AddPurpose({"Production": "HBW_P",       "Attraction": "HBW_A"})
+    obj.AddPurpose({"Production": "HBNW_P",      "Attraction": "HBNW_A"})
+    obj.AddPurpose({"Production": "NHB_P",       "Attraction": "NHB_A"})
+    obj.AddPurpose({"Production": "TRUCKTAXI_P", "Attraction": "TRUCKTAXI_A"})
 
     ok = obj.Run()
     if not ok:
         raise RuntimeError("Generation.Balance failed.")
+    if not os.path.exists(pa_file):
+        raise RuntimeError(f"Balance ran but output not found: {pa_file}")
 
-    # Clean up intermediate views — downstream steps open their own
     dk.CloseView(joined)
     dk.CloseView(taz_vw)
     dk.CloseView(prod_vw)
@@ -135,7 +163,13 @@ def run_balancing(dk: caliperpy.Gisdk, taz_vw: str, prod_vw: str,
     print(f"  Balanced P-A → {pa_file}")
     return pa_file
 
-def build_network(dk, net_output: str = "ScriptNetwork.net") -> str:
+
+def build_network(dk: caliperpy.Gisdk,
+                  net_output: str = "Script_Network.net") -> str:
+    """
+    Build highway network from network.dbd.
+    UseLinkTypes requires LinkTypeInfo() to be called on Network.Create first.
+    """
     print("\n--- Step 2A: Build Highway Network ---")
 
     net_file = os.path.join(MODEL_DIR, net_output)
@@ -153,130 +187,166 @@ def build_network(dk, net_output: str = "ScriptNetwork.net") -> str:
     net_obj.AddLinkField({"Name": "Alpha",    "Field": "ALPHA"})
     net_obj.AddLinkField({"Name": "Beta",     "Field": "BETA"})
 
-    # Register FUNCL as the link type field in the network
-    net_obj.LinkTypeInfo({
-        "Label":      "FUNCL",
-        "LayerField": "FUNCL",
-    })
+    # LinkTypeInfo must be called before Run() for UseLinkTypes to work
+    net_obj.LinkTypeInfo({"Label": "FUNCL", "LayerField": "FUNCL"})
 
     ok = net_obj.Run()
     if not ok:
         raise RuntimeError("Network.Create failed.")
     print(f"  Network created: {net_file}")
 
-    # Network.Settings — set centroids only
-    # UseLinkTypes omitted entirely — the network must already embed
-    # a type field from LinkTypeInfo before Settings can enable it.
-    # If link type reporting is not needed, leave UseLinkTypes out.
     net_set = dk.CreateObject("Network.Settings", None)
-    net_set.Network = net_file
+    net_set.Network        = net_file
     net_set.CentroidFilter = "TAZ <> null"
-    net_set.UseLinkTypes = True
+    net_set.UseLinkTypes   = True
     ok2 = net_set.Run()
     if not ok2:
         raise RuntimeError("Network.Settings failed.")
-    print("  Centroids configured.")
+    print("  Centroids and link types configured.")
 
     return net_file
 
-def run_skims(dk, net_file: str, skim_output: str = "My_Skim.mtx") -> str:
+def _build_taz_index(dk, matrix, node_bin_path: str):
+    """
+    Remap skim matrix from node IDs → TAZ IDs.
+    Closes any stale Nodes views before opening to prevent :1 deduplication.
+    """
+    # Close any open views whose name starts with "Node" or "Nodes"
+    try:
+        views = dk.GetViews(None)[0] or []
+        for vw in views:
+            if vw.lower().startswith("node"):
+                try: dk.CloseView(vw)
+                except: pass
+    except: pass
+
+    node_vw = dk.OpenTable("Nodes", "FFB", [node_bin_path, None])
+    print(f"  Node view: '{node_vw}'")
+
+    # Verify IDs overlap with matrix before attempting index
+    node_ids = dk.VectorToArray(dk.GetDataVector(node_vw + "|", "ID",  None))
+    taz_vals = dk.VectorToArray(dk.GetDataVector(node_vw + "|", "TAZ", None))
+    centroids = [(i, t) for i, t in zip(node_ids, taz_vals) if t is not None]
+    print(f"  Centroids: {len(centroids)}  sample: {centroids[:3]}")
+
+    dk.SetView(node_vw)
+    dk.SelectByQuery("Centroids", "Several",
+                     "Select * where TAZ <> null", None)
+
+    idx = dk.CreateMatrixIndex(
+        "TAZ", matrix, "Both",
+        node_vw + "|Centroids",
+        "ID",   # old: node IDs (current matrix index)
+        "TAZ"   # new: TAZ numbers (1–390)
+    )
+    dk.CloseView(node_vw)
+    print(f"  TAZ index: '{idx}'")
+    return idx
+
+def run_skims(dk: caliperpy.Gisdk,
+              net_file:    str = None,
+              skim_output: str = "Script_Skim.mtx") -> tuple:
     print("\n--- Step 2B: Skim Matrix ---")
 
     skim_file = os.path.join(MODEL_DIR, skim_output)
-    _delete_if_exists(skim_file)
+    _delete_if_exists(skim_file, dk)
 
     obj = dk.CreateObject("Network.Skims", None)
     obj.Network      = net_file
-    obj.LayerDB      = os.path.join(MODEL_DIR, "network.dbd")
+    obj.LayerDB      = os.path.join(MODEL_DIR, "Network.dbd")
     obj.Origins      = "TAZ <> null"
     obj.Destinations = "TAZ <> null"
     obj.Minimize     = "Time"
-    obj.AddSkimField({"Field": "Time", "Type": "All"})
     obj.OutputMatrix({
         "MatrixFile":  skim_file,
-        "Matrix":      "Shortest Path",
+        "Matrix":      "Skim",
         "Compression": True,
+        "ColumnMajor": False,
     })
 
     ok = obj.Run()
     if not ok:
         raise RuntimeError("Network.Skims failed.")
+
+    # OutputMatrix path is sometimes ignored — find what was actually written
     if not os.path.exists(skim_file):
-        raise RuntimeError(f"Skims ran but file not found: {skim_file}")
-
-    # ── Add a TAZ-based index so gravity can match PA table IDs ──────────
-    # The skim matrix rows/cols are node IDs by default.
-    # Gravity expects zone (TAZ) IDs — create an index that maps
-    # node ID → TAZ using the TAZ field in the nodes layer.
-    #
-    # CreateMatrixIndex(name, matrix, type, view_set, old_id, new_id)
-    #   view_set : "NodeViewName|"  — all centroid nodes
-    #   old_id   : "ID"   — the node ID field (current matrix index)
-    #   new_id   : "TAZ"  — the TAZ field to remap to
-    net_db = os.path.join(MODEL_DIR, "network.dbd")
-
-    # Open the node layer to get the TAZ mapping
-    node_layers = dk.GetDBLayers(net_db)
-    # Node layer is typically the second layer in a .dbd (line + node)
-    node_layer  = next((l for l in node_layers if "node" in l.lower()), node_layers[-1])
-    node_vw     = dk.OpenTable(node_layer, "FFB",
-                               [net_db.replace(".dbd", ".bin"), None])
-
-    # Select only centroid nodes (TAZ <> null)
-    dk.SetView(node_vw)
-    dk.SelectByQuery("Centroids", "Several", "Select * where TAZ <> null", None)
+        import glob as _glob
+        # Only look for files newer than 5 seconds ago to avoid stale matches
+        import time
+        cutoff  = time.time() - 10
+        recent  = [f for f in _glob.glob(os.path.join(MODEL_DIR, "*.mtx"))
+                   if os.path.getmtime(f) > cutoff]
+        # Exclude known non-skim files
+        exclude = {"pa.mtx", "od.mtx", "ScriptPA.mtx"}
+        recent  = [f for f in recent
+                   if os.path.basename(f).lower() not in
+                   {e.lower() for e in exclude}]
+        if not recent:
+            raise RuntimeError(
+                f"Skim ran but no new .mtx found. "
+                f"OutputMatrix path '{skim_file}' was ignored by TransCAD."
+            )
+        # Copy the most recent to our stable path
+        import shutil
+        actual = max(recent, key=os.path.getmtime)
+        shutil.copy2(actual, skim_file)
+        print(f"  Copied {os.path.basename(actual)} → {skim_file}")
 
     matrix    = dk.OpenMatrix(skim_file, "True")
     core_name = dk.GetMatrixCoreNames(matrix)[0]
-    print(f"  Skim core: '{core_name}'")
 
-    # Create the TAZ index on the matrix
-    idx_name = dk.CreateMatrixIndex(
-        "TAZ",          # name for the new index
-        matrix,         # matrix handle
-        "Both",         # apply to both rows and columns
-        node_vw + "|Centroids",  # view|set of centroid nodes
-        "ID",           # old ID field (node IDs in the matrix)
-        "TAZ"           # new ID field (TAZ numbers to remap to)
-    )
-    print(f"  Matrix index created: '{idx_name}'")
-    dk.CloseView(node_vw)
+    mc      = dk.CreateMatrixCurrency(matrix, core_name, None, None, None)
+    row_ids = dk.VectorToArray(dk.GetMatrixVector(mc, [["Index", "Row"]]))
+    print(f"  Core: '{core_name}'  IDs: {row_ids[:3]}...{row_ids[-3:]}")
 
-    print(f"  Skim matrix → {skim_file}")
-    return skim_file, core_name   # return both so gravity uses confirmed names
+    # Always remap node IDs → TAZ IDs
+    _build_taz_index(dk, matrix, os.path.join(MODEL_DIR, "Network_.bin"))
 
-def run_intrazonal(dk: caliperpy.Gisdk, skim_file: str):
+    print(f"  Skim → {skim_file}")
+    return skim_file, core_name
+
+def run_intrazonal(dk: caliperpy.Gisdk, skim_file: str, skim_core: str):
     """
-    Distribution.Intrazonal — fill diagonal of skim matrix.
-    Docs: GISDK/api/distributionintrazonal.htm
-    Factor = 0.5 per tutorial (half the average of nearest neighbours).
+    Fill the skim matrix diagonal with intrazonal travel times.
+    skim_core must be the actual core name from run_skims() — never hardcode.
     """
+    print("\n--- Step 2C: Intrazonal Travel Times ---")
+
     obj = dk.CreateObject("Distribution.Intrazonal", None)
     obj.Factor    = 0.5
     obj.Neighbors = 3
-    obj.SetMatrix({"MatrixFile": skim_file, "MatrixCore": "Shortest Path"})
+    obj.SetMatrix({"MatrixFile": skim_file, "MatrixCore": skim_core})
+
     ok = obj.Run()
     if not ok:
         raise RuntimeError("Distribution.Intrazonal failed.")
     print("  Intrazonal times filled.")
 
 
-def run_gravity(dk, pa_file: str, skim_file: str, skim_core: str,
-                output_file: str = "My_PA.mtx") -> str:
+def run_gravity(dk: caliperpy.Gisdk,
+                pa_file:     str,
+                skim_file:   str,
+                skim_core:   str,
+                output_file: str = "Script_PA.mtx") -> str:
+    """
+    Doubly-constrained gravity model.
+    Uses the TAZ index on the skim matrix (built in run_skims) so that
+    matrix row/col IDs match the TAZ IDs in the PA table.
+    """
     print("\n--- Step 3: Trip Distribution (Gravity Model) ---")
-
     gravity_out = os.path.join(MODEL_DIR, output_file)
-    _delete_if_exists(gravity_out)
+    close_all_matrices(dk)
+    _delete_if_exists(gravity_out, dk)
 
-    # Use the TAZ index we built in run_skims so IDs match the PA table
     sp_mat = {
         "MatrixFile": skim_file,
         "Matrix":     skim_core,
-        "RowIndex":   "TAZ",       # ← TAZ index, not default node ID index
+        "RowIndex":   "TAZ",    # use the remapped TAZ index
         "ColIndex":   "TAZ",
-    }
-
+    }    
+    
     ff_table = os.path.join(MODEL_DIR, "FFDATA.DBF")
+
     obj = dk.CreateObject("Distribution.Gravity", None)
     obj.CalculateTLD = True
     obj.AddDataSource({"TableName": pa_file})
@@ -290,7 +360,7 @@ def run_gravity(dk, pa_file: str, skim_file: str, skim_core: str,
             "Production":      purpose + "_P",
             "Attraction":      purpose + "_A",
             "ConstraintType":  "Doubly",
-            "Iterations":      20,
+            "Iterations":      100,
             "Convergence":     0.01,
             "ImpedanceMatrix": sp_mat,
             "Table": {
@@ -316,3 +386,151 @@ def run_gravity(dk, pa_file: str, skim_file: str, skim_core: str,
     return gravity_out
 
 
+def run_pa2od(dk: caliperpy.Gisdk,
+              gravity_file: str,
+              output_file:  str = "Script_OD.mtx",
+              occupancy_overrides: dict = None) -> str:
+    """
+    Convert PA matrix to OD vehicle trips.
+    occupancy_overrides: dict of {purpose: occupancy} to override defaults.
+    """
+    print("\n--- Step 4: PA to OD ---")
+
+    od_out = os.path.join(MODEL_DIR, output_file)
+    close_all_matrices(dk)
+    _delete_if_exists(od_out, dk)
+
+    occ = {"HBW": 1.1, "HBNW": 1.3, "NHB": 1.5, "TRUCKTAXI": 1.0}
+    if occupancy_overrides:
+        occ.update(occupancy_overrides)
+
+    o = dk.CreateObject("Distribution.PA2OD", None)
+    o.Matrix(gravity_file)
+    o.Daily        = True
+    o.ReportByHour = False
+    for purpose, occupancy in occ.items():
+        o.AddPurpose({"Name": purpose, "Occupancy": occupancy})
+    o.OutputMatrix(od_out)
+
+    ok = o.Run()
+    if not ok:
+        raise RuntimeError("Distribution.PA2OD failed.")
+    if not os.path.exists(od_out):
+        raise RuntimeError(f"PA2OD ran but output not found: {od_out}")
+
+    print(f"  OD matrix → {od_out}")
+    return od_out
+
+
+def run_assignment(dk: caliperpy.Gisdk,
+                   net_file:         str,
+                   od_file:          str,
+                   flow_output:      str   = "Script_Daily_Assign.bin",
+                   demand_multiplier: float = 1.0) -> dict:
+    """
+    User Equilibrium traffic assignment (CUE) with BPR delay function.
+
+    The OD matrix must have a TAZ-to-NodeID index for the assignment to
+    match zone IDs to network node IDs. This index is built here if it
+    doesn't already exist.
+
+    Returns dict: {VMT, VHT, flow_bin, bottlenecks_df}
+    """
+    print("\n--- Step 5: Traffic Assignment ---")
+
+    from transcad.caliper_helpers import get_bottlenecks
+
+    flow_bin = os.path.join(MODEL_DIR, flow_output)
+    close_all_matrices(dk)
+    _delete_if_exists(flow_bin)
+
+    # ── Build TAZ→NodeID index on OD matrix ──────────────────────────────
+    # PA2OD writes zone IDs; assignment needs node IDs.
+    od_matrix  = dk.OpenMatrix(od_file, "True")
+    od_cores   = dk.GetMatrixCoreNames(od_matrix)
+    print(f"  OD cores: {od_cores}")
+
+    net_db   = os.path.join(MODEL_DIR, "network.dbd")
+    node_bin = os.path.join(MODEL_DIR, "Network_.bin")
+
+    # Close stale Nodes views to prevent :1 deduplication
+    try:
+        views = dk.GetViews(None)[0] or []
+        for vw in views:
+            if vw.lower().startswith("node"):
+                try: dk.CloseView(vw)
+                except: pass
+    except: pass
+
+    node_vw = dk.OpenTable("Nodes", "FFB", [node_bin, None])
+    print(f"  Node view: '{node_vw}'")
+    dk.SetView(node_vw)
+    dk.SelectByQuery("Centroids", "Several",
+                     "Select * where TAZ <> null", None)
+    # TAZ → Node ID (reverse of the skim index)
+    dk.CreateMatrixIndex(
+        "TAZ to Node ID",
+        od_matrix,
+        "Both",
+        node_vw + "|Centroids",
+        "TAZ",   # old IDs = TAZ numbers (current OD matrix index)
+        "ID"     # new IDs = node IDs (needed by assignment)
+    )
+    dk.CloseView(node_vw)
+
+    # Use first core as QuickSum if QuickSum doesn't exist
+    demand_core = "QuickSum" if "QuickSum" in od_cores else od_cores[0]
+    print(f"  Demand core: '{demand_core}'")
+
+    obj = dk.CreateObject("Network.Assignment", None)
+    obj.LayerDB     = net_db
+    obj.Network     = net_file
+    obj.Method      = "CUE"
+    obj.Iterations  = 100
+    obj.Convergence = 0.0001
+    obj.FlowTable   = flow_bin
+
+    if demand_multiplier != 1.0:
+        obj.DemandMultiplier = demand_multiplier
+
+    obj.DemandMatrix({
+        "MatrixFile":  od_file,
+        "Matrix":      demand_core,
+        "RowIndex":    "TAZ to Node ID",
+        "ColumnIndex": "TAZ to Node ID",
+    })
+
+    for core in od_cores:
+        obj.AddClass({"Demand": core})
+
+    obj.DelayFunction = {
+        "Function": "bpr.vdf",
+        "Fields":   ["Time", "Capacity", "Alpha", "Beta", "None"],
+    }
+
+    ok = obj.Run()
+    if not ok:
+        raise RuntimeError("Network.Assignment failed.")
+    if not os.path.exists(flow_bin):
+        raise RuntimeError(f"Assignment ran but flow table not found: {flow_bin}")
+
+    # ── Read VMT / VHT ────────────────────────────────────────────────────
+    # GetTaskResults() returns a tuple in caliperpy — index directly
+    task_results = obj.GetTaskResults()
+    result_dict  = dict(task_results)
+
+    vmt = float(result_dict.get("VMT w/o Centroids", result_dict.get("Total VMT", 0)))
+    vht = float(result_dict.get("VHT w/o Centroids", result_dict.get("Total VHT", 0)))    
+    
+    bottlenecks = get_bottlenecks(dk, flow_bin, vc_threshold=1.0)
+
+    print(f"  Flow table  → {flow_bin}")
+    print(f"  VMT: {vmt:,.0f}   VHT: {vht:,.0f}")
+    print(f"  Bottlenecks (V/C > 1): {len(bottlenecks)}")
+
+    return {
+        "VMT":            vmt,
+        "VHT":            vht,
+        "flow_bin":       flow_bin,
+        "bottlenecks_df": bottlenecks,
+    }

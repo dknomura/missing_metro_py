@@ -144,6 +144,39 @@ def drop_fields(dk, vw, to_drop):
     dk.ModifyTable(vw, new_struct)
 ```
 
+[CONFIRMED] FillVector does not exist in TransCAD 10 GISDK.
+
+[CONFIRMED] Vector objects returned by GetDataVector have three attributes:
+  .dk_server  — the caliperpy Gisdk instance
+  .dk_value   — the raw COM handle (pass this where GISDK expects a Vector)
+  .assign_expression — used internally for lazy eval; v * scalar returns
+                       an Expression, not a Vector. Never use Vector arithmetic.
+
+[CONFIRMED] The only reliable way to write to a view field is:
+  dk.SetDataVector(vw + "|", field, vector.dk_value, None)
+  where vector was obtained from dk.GetDataVector on the same field.
+  You cannot construct a new Vector from a Python list without ArrayToVector,
+  and ArrayToVector signature in caliperpy is dk.ArrayToVector(list) — 1 arg.
+  Test before relying on it; COM type matching is fragile.
+
+[CONFIRMED] ApplyLinearModel silently no-ops if the dependent field already
+contains non-zero values from a prior run. Always call close_all_views(dk)
+before open_taz(dk) to get a clean slate. Never reuse a TAZ view across
+pipeline runs.
+
+[CONFIRMED] There is no Vector() constructor callable via RunMacro in
+TransCAD 10. To zero a field without SetDataVector, drop and re-add it:
+    struct = [list(s) for s in dk.GetTableStructure(vw, {"Include Original": "True"})]
+    dk.ModifyTable(vw, [s for s in struct if s[0] != fld])
+    add_field(dk, vw, fld, "Real", 12, 4)
+This is the only confirmed-working zero pattern that avoids Vector type issues.
+
+[CONFIRMED] There is no API to release matrix file handles in TransCAD 10.
+"File X.mtx is in use" with no file on disk means a stale in-memory handle
+from a prior session. The only fix is to physically close and reopen the
+TransCAD application — disconnect/reload/connect in Python alone is
+insufficient. Prevention: always use unique output filenames per session
+(e.g. timestamp suffix) so TransCAD never reuses a handle.
 ---
 
 ## Non-Existent Functions — Never Use

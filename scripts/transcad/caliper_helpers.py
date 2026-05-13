@@ -92,6 +92,7 @@ def close_all_views(dk):
     Call this before deleting output files.
     GetViews(None) returns [view_names_array, current_index, current_name].
     """
+    close_all_matrices(dk)
     try:
         view_info = dk.GetViews(None)
         view_names = view_info[0]          # element 1 = array of view name strings
@@ -105,30 +106,34 @@ def close_all_views(dk):
     except Exception:
         pass
 
+def close_all_matrices(dk):
+    pass
 
-def _delete_if_exists(path: str):
-    """Delete a .bin and its .dcb descriptor, silently skipping if absent."""
-    for f in [path, path.replace(".bin", ".dcb")]:
+def _delete_if_exists(path: str, dk=None):
+    """Delete file + companion descriptor."""
+    for f in [path, path.replace(".bin", ".dcb"),
+              path.replace(".mtx", ".mtx.lock")]:
         if os.path.exists(f):
-            os.remove(f)
-            print(f"  Deleted: {f}")
+            try:
+                os.remove(f)
+                print(f"  Deleted: {f}")
+            except PermissionError:
+                print(f"  WARNING: could not delete {f} — still locked")
 
-
-def get_bottlenecks(dk: caliperpy.Gisdk, flow_bin: str, vc_threshold: float = 1.0) -> pd.DataFrame:
-    """
-    Return a DataFrame of links where (AB_VOC > threshold OR BA_VOC > threshold).
-    Columns: ID, AB_Flow, BA_Flow, AB_VOC, BA_VOC, AB_Time, BA_Time,
-             Length, [AB_CAPACITY], FUNCL
-    """
+def get_bottlenecks(dk, flow_bin: str, vc_threshold: float = 1.0) -> pd.DataFrame:
     vw = dk.OpenTable("Bottlenecks", "FFB", [flow_bin, None])
+    all_fields, _ = dk.GetFields(vw, "All")
+    
+    # Use fields that actually exist in the flow table
     fields = ["ID1", "AB_Flow", "BA_Flow", "AB_VOC", "BA_VOC",
-              "AB_Time", "BA_Time", "Length", "AB_CAPACITY", "BA_CAPACITY"]
+              "AB_Time", "BA_Time", "AB_VMT", "BA_VMT",
+              "AB_VHT", "BA_VHT", "Tot_VMT"]
+    fields = [f for f in fields if f in all_fields]
 
-    # Pull vectors; some fields may be absent – guard with try/except
     data = {}
     for f in fields:
         try:
-            data[f] = list(dk.GetDataVector(vw, f, None))
+            data[f] = list(dk.GetDataVector(vw + "|", f, None))
         except Exception:
             data[f] = [None] * dk.GetRecordCount(vw, None)
     dk.CloseView(vw)
