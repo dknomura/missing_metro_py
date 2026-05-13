@@ -1,0 +1,1 @@
+MODEL_DIR = r"C:\Users\dknom\Documents\school\CE5640_transportation_planning\Base Model - Data\Base Model_Script" + "\\"

@@ -6,6 +6,7 @@ Using uv, install instructions [in repo](https://github.com/astral-sh/uv)
 ```bash
 # Install dependencies
 uv sync
+uv pip install -e .
 ```
 
 ## Development

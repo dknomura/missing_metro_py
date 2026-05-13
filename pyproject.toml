@@ -15,6 +15,7 @@ dependencies = [
     "numpy>=2.4.2",
     "pandas>=3.0.0",
     "pre-commit>=4.5.1",
+    "pypiwin32>=223",
     "requests>=2.32.5",
     "ruff>=0.15.1",
     "setuptools>=82.0.0",
@@ -22,3 +23,10 @@ dependencies = [
 
 [tool.jupytext.formats]
 formats = "ipynb,py:percent"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
