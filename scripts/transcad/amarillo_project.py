@@ -42,7 +42,7 @@ import pandas as pd
 import caliperpy
 
 from transcad.constants import MODEL_DIR
-from transcad.caliper_4_step_model import build_network, run_attractions, run_balancing, run_cross_classification, run_skims
+from transcad.caliper_4_step_model import build_network, run_attractions, run_balancing, run_cross_classification, run_gravity, run_intrazonal, run_skims
 from transcad.caliper_helpers import get_bottlenecks, get_dk, open_taz, view_mtx, view_bin
 from transcad.caliper_helpers import scale_taz_fields, sum_flow_field
 
@@ -62,81 +62,12 @@ prods_file, prod_vw = run_cross_classification(dk, taz_vw)
 run_attractions(dk, taz_vw)  
 pa = run_balancing(dk, taz_vw, prod_vw)  
 net_file = build_network(dk)
-skim_file = run_skims(dk, net_file)
-# %%
+skim_file, skim_core = run_skims(dk, net_file)
+run_intrazonal(dk, skim_file)
+grav = run_gravity(dk, pa, skim_file, skim_core)# %%
 
 # view_bin(dk, skim_file)
 view_mtx(dk, skim_file)
-
-# %%
-def run_intrazonal(dk: caliperpy.Gisdk, skim_file: str):
-    """
-    Distribution.Intrazonal — fill diagonal of skim matrix.
-    Docs: GISDK/api/distributionintrazonal.htm
-    Factor = 0.5 per tutorial (half the average of nearest neighbours).
-    """
-    obj = dk.CreateObject("Distribution.Intrazonal", None)
-    obj.Factor    = 0.5
-    obj.Neighbors = 3
-    obj.SetMatrix({"MatrixFile": skim_file, "MatrixCore": "Shortest Path"})
-    ok = obj.Run()
-    if not ok:
-        raise RuntimeError("Distribution.Intrazonal failed.")
-    print("  Intrazonal times filled.")
-
-
-# %%
-
-def run_gravity(dk: caliperpy.Gisdk, pa_file: str, skim_file: str,
-                output_file: str = "Script_PA.mtx") -> str:
-    """
-    Distribution.Gravity — doubly-constrained gravity model.
-    Docs: GISDK/api/distributiongravity.htm
-    """
-    gravity_out = os.path.join(MODEL_DIR, output_file)
-    sp_mat = {
-        "MatrixFile": skim_file,
-        "Matrix":     "Shortest Path",
-        "RowIndex":   "Origin",
-        "ColIndex":   "Destination",
-    }
-    ff_table = os.path.join(MODEL_DIR, "FFDATA.DBF")
-
-    obj = dk.CreateObject("Distribution.Gravity", None)
-    obj.CalculateTLD = True
-    obj.AddDataSource({"TableName": pa_file})
-
-    for purpose, ff_field in [("HBW",      "HBW"),
-                               ("HBNW",     "HBNW"),
-                               ("NHB",      "NHB"),
-                               ("TRUCKTAXI","TRUCKTAXI")]:
-        obj.AddPurpose({
-            "Name":            purpose,
-            "Production":      purpose + "_P",
-            "Attraction":      purpose + "_A",
-            "ConstraintType":  "Doubly",
-            "Iterations":      20,
-            "Convergence":     0.01,
-            "ImpedanceMatrix": sp_mat,
-            "Table": {
-                "Name":          ff_table,
-                "TimeField":     "TIME",
-                "FrictionField": ff_field,
-            },
-        })
-
-    obj.OutputMatrix({
-        "MatrixFile":  gravity_out,
-        "MatrixLabel": "Gravity Output",
-        "Compression": True,
-    })
-    ok = obj.Run()
-    if not ok:
-        raise RuntimeError("Distribution.Gravity failed.")
-    print(f"  Gravity matrix → {gravity_out}")
-    return gravity_out
-
-
 # %%
 
 def run_pa2od(dk: caliperpy.Gisdk, gravity_file: str,
@@ -312,13 +243,10 @@ def run_full_model(dk: caliperpy.Gisdk,
     # ── Step 2: Network + Skim ────────────────────────────────────────
     print("\n[2] Network & Skim")
     net  = build_network(dk)
-    skim = run_skims(dk, net, skim_output=skim_output)
-    run_intrazonal(dk, skim)
-
-    # ── Step 3: Trip Distribution ─────────────────────────────────────
+    skim_file, skim_core = run_skims(dk, net_file)
+    run_intrazonal(dk, skim_file)
     print("\n[3] Trip Distribution")
-    grav = run_gravity(dk, pa, skim, output_file=gravity_output)
-
+    grav = run_gravity(dk, pa, skim_file, skim_core)
     # ── Step 4: PA to OD ──────────────────────────────────────────────
     print("\n[4] PA to OD")
     # Build dynamic occupancy kwargs

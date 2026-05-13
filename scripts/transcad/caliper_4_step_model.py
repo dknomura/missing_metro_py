@@ -1,4 +1,3 @@
-# %%
 import caliperpy
 from transcad.constants import MODEL_DIR
 from transcad.caliper_helpers import _delete_if_exists, add_field
@@ -97,7 +96,7 @@ def run_attractions(dk: caliperpy.Gisdk, taz_vw: str):
 
 
 def run_balancing(dk: caliperpy.Gisdk, taz_vw: str, prod_vw: str,
-                  output_file: str = "MY_PA.bin") -> str:
+                  output_file: str = "ScriptPA.bin") -> str:
     """
     Balance productions and attractions.
     taz_vw:  open view of taz.bin  — has HBW_A, HBNW_A etc.
@@ -136,7 +135,7 @@ def run_balancing(dk: caliperpy.Gisdk, taz_vw: str, prod_vw: str,
     print(f"  Balanced P-A → {pa_file}")
     return pa_file
 
-def build_network(dk, net_output: str = "My_Network.net") -> str:
+def build_network(dk, net_output: str = "ScriptNetwork.net") -> str:
     print("\n--- Step 2A: Build Highway Network ---")
 
     net_file = os.path.join(MODEL_DIR, net_output)
@@ -180,8 +179,6 @@ def build_network(dk, net_output: str = "My_Network.net") -> str:
 
     return net_file
 
-
-# %%
 def run_skims(dk, net_file: str, skim_output: str = "My_Skim.mtx") -> str:
     print("\n--- Step 2B: Skim Matrix ---")
 
@@ -193,17 +190,8 @@ def run_skims(dk, net_file: str, skim_output: str = "My_Skim.mtx") -> str:
     obj.LayerDB      = os.path.join(MODEL_DIR, "network.dbd")
     obj.Origins      = "TAZ <> null"
     obj.Destinations = "TAZ <> null"
-
-    # Minimize field must exactly match the Name used in AddLinkField()
-    # We used {"Name": "Time", "IsTimeField": True} in Network.Create
-    obj.Minimize = "Time"
-
-    # AddSkimField(arr) — positional array:
-    #   [0] = network field name (must match AddLinkField Name exactly)
-    #   [1] = skim type: "All" skims all links
-    # Pass as a dict instead — some caliperpy versions reject a bare list
+    obj.Minimize     = "Time"
     obj.AddSkimField({"Field": "Time", "Type": "All"})
-
     obj.OutputMatrix({
         "MatrixFile":  skim_file,
         "Matrix":      "Shortest Path",
@@ -213,6 +201,118 @@ def run_skims(dk, net_file: str, skim_output: str = "My_Skim.mtx") -> str:
     ok = obj.Run()
     if not ok:
         raise RuntimeError("Network.Skims failed.")
+    if not os.path.exists(skim_file):
+        raise RuntimeError(f"Skims ran but file not found: {skim_file}")
+
+    # ── Add a TAZ-based index so gravity can match PA table IDs ──────────
+    # The skim matrix rows/cols are node IDs by default.
+    # Gravity expects zone (TAZ) IDs — create an index that maps
+    # node ID → TAZ using the TAZ field in the nodes layer.
+    #
+    # CreateMatrixIndex(name, matrix, type, view_set, old_id, new_id)
+    #   view_set : "NodeViewName|"  — all centroid nodes
+    #   old_id   : "ID"   — the node ID field (current matrix index)
+    #   new_id   : "TAZ"  — the TAZ field to remap to
+    net_db = os.path.join(MODEL_DIR, "network.dbd")
+
+    # Open the node layer to get the TAZ mapping
+    node_layers = dk.GetDBLayers(net_db)
+    # Node layer is typically the second layer in a .dbd (line + node)
+    node_layer  = next((l for l in node_layers if "node" in l.lower()), node_layers[-1])
+    node_vw     = dk.OpenTable(node_layer, "FFB",
+                               [net_db.replace(".dbd", ".bin"), None])
+
+    # Select only centroid nodes (TAZ <> null)
+    dk.SetView(node_vw)
+    dk.SelectByQuery("Centroids", "Several", "Select * where TAZ <> null", None)
+
+    matrix    = dk.OpenMatrix(skim_file, "True")
+    core_name = dk.GetMatrixCoreNames(matrix)[0]
+    print(f"  Skim core: '{core_name}'")
+
+    # Create the TAZ index on the matrix
+    idx_name = dk.CreateMatrixIndex(
+        "TAZ",          # name for the new index
+        matrix,         # matrix handle
+        "Both",         # apply to both rows and columns
+        node_vw + "|Centroids",  # view|set of centroid nodes
+        "ID",           # old ID field (node IDs in the matrix)
+        "TAZ"           # new ID field (TAZ numbers to remap to)
+    )
+    print(f"  Matrix index created: '{idx_name}'")
+    dk.CloseView(node_vw)
 
     print(f"  Skim matrix → {skim_file}")
-    return skim_file
+    return skim_file, core_name   # return both so gravity uses confirmed names
+
+def run_intrazonal(dk: caliperpy.Gisdk, skim_file: str):
+    """
+    Distribution.Intrazonal — fill diagonal of skim matrix.
+    Docs: GISDK/api/distributionintrazonal.htm
+    Factor = 0.5 per tutorial (half the average of nearest neighbours).
+    """
+    obj = dk.CreateObject("Distribution.Intrazonal", None)
+    obj.Factor    = 0.5
+    obj.Neighbors = 3
+    obj.SetMatrix({"MatrixFile": skim_file, "MatrixCore": "Shortest Path"})
+    ok = obj.Run()
+    if not ok:
+        raise RuntimeError("Distribution.Intrazonal failed.")
+    print("  Intrazonal times filled.")
+
+
+def run_gravity(dk, pa_file: str, skim_file: str, skim_core: str,
+                output_file: str = "My_PA.mtx") -> str:
+    print("\n--- Step 3: Trip Distribution (Gravity Model) ---")
+
+    gravity_out = os.path.join(MODEL_DIR, output_file)
+    _delete_if_exists(gravity_out)
+
+    # Use the TAZ index we built in run_skims so IDs match the PA table
+    sp_mat = {
+        "MatrixFile": skim_file,
+        "Matrix":     skim_core,
+        "RowIndex":   "TAZ",       # ← TAZ index, not default node ID index
+        "ColIndex":   "TAZ",
+    }
+
+    ff_table = os.path.join(MODEL_DIR, "FFDATA.DBF")
+    obj = dk.CreateObject("Distribution.Gravity", None)
+    obj.CalculateTLD = True
+    obj.AddDataSource({"TableName": pa_file})
+
+    for purpose, ff_field in [("HBW",       "HBW"),
+                               ("HBNW",      "HBNW"),
+                               ("NHB",       "NHB"),
+                               ("TRUCKTAXI", "TRUCKTAXI")]:
+        obj.AddPurpose({
+            "Name":            purpose,
+            "Production":      purpose + "_P",
+            "Attraction":      purpose + "_A",
+            "ConstraintType":  "Doubly",
+            "Iterations":      20,
+            "Convergence":     0.01,
+            "ImpedanceMatrix": sp_mat,
+            "Table": {
+                "Name":          ff_table,
+                "TimeField":     "TIME",
+                "FrictionField": ff_field,
+            },
+        })
+
+    obj.OutputMatrix({
+        "MatrixFile":  gravity_out,
+        "MatrixLabel": "Gravity Output",
+        "Compression": True,
+    })
+
+    ok = obj.Run()
+    if not ok:
+        raise RuntimeError("Distribution.Gravity failed.")
+    if not os.path.exists(gravity_out):
+        raise RuntimeError(f"Gravity ran but output not found: {gravity_out}")
+
+    print(f"  Gravity matrix → {gravity_out}")
+    return gravity_out
+
+

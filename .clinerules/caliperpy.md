@@ -122,6 +122,7 @@ def close_all_views(dk):
 rendering under COM which can crash TransCAD.
 
 ---
+[CONFIRMED] Never hardcode matrix core names. Network.Skims names cores after the Minimize field ("Time"), not "Shortest Path". Always read the actual name with GetMatrixCoreNames(matrix)[0] before referencing it.
 
 ## Adding / Dropping Fields
 
