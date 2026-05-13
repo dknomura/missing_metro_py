@@ -119,14 +119,10 @@ def run_balancing(dk: caliperpy.Gisdk, taz_vw: str, prod_vw: str,
     obj.AddDataSource({"ViewName": joined})
     obj.OutputFile = pa_file
 
-    obj.AddPurpose({"Production": "HBW_P",       "Attraction": "HBW_A",
-                    "HoldAttrFilter": f"{joined}.SP_HBW <> null"})
-    obj.AddPurpose({"Production": "HBNW_P",      "Attraction": "HBNW_A",
-                    "HoldAttrFilter": f"{joined}.SP_HBNW <> null"})
-    obj.AddPurpose({"Production": "NHB_P",       "Attraction": "NHB_A",
-                    "HoldAttrFilter": f"{joined}.SP_NHB <> null"})
-    obj.AddPurpose({"Production": "TRUCKTAXI_P", "Attraction": "TRUCKTAXI_A",
-                    "HoldAttrFilter": f"{joined}.SP_TRUCKTAXI <> null"})
+    obj.AddPurpose({"Production": "HBW_P",       "Attraction": "HBW_A",})
+    obj.AddPurpose({"Production": "HBNW_P",      "Attraction": "HBNW_A",})
+    obj.AddPurpose({"Production": "NHB_P",       "Attraction": "NHB_A",})
+    obj.AddPurpose({"Production": "TRUCKTAXI_P", "Attraction": "TRUCKTAXI_A",})
 
     ok = obj.Run()
     if not ok:
@@ -140,5 +136,74 @@ def run_balancing(dk: caliperpy.Gisdk, taz_vw: str, prod_vw: str,
     print(f"  Balanced P-A → {pa_file}")
     return pa_file
 
+def build_network(dk, net_output: str = "My_Network.net") -> str:
+    print("\n--- Step 2A: Build Highway Network ---")
+
+    net_file = os.path.join(MODEL_DIR, net_output)
+    _delete_if_exists(net_file)
+
+    net_obj = dk.CreateObject("Network.Create", None)
+    net_obj.LayerDB        = os.path.join(MODEL_DIR, "network.dbd")
+    net_obj.TimeUnits      = "Minutes"
+    net_obj.OutNetworkName = net_file
+
+    net_obj.AddLinkField({"Name": "Time",     "Field": "TIME",
+                          "IsTimeField": True})
+    net_obj.AddLinkField({"Name": "Capacity", "Field": ["AB_CAPACITY",
+                                                         "BA_CAPACITY"]})
+    net_obj.AddLinkField({"Name": "Alpha",    "Field": "ALPHA"})
+    net_obj.AddLinkField({"Name": "Beta",     "Field": "BETA"})
+
+    # Register FUNCL as the link type field in the network
+    net_obj.LinkTypeInfo({
+        "Label":      "FUNCL",
+        "LayerField": "FUNCL",
+    })
+
+    ok = net_obj.Run()
+    if not ok:
+        raise RuntimeError("Network.Create failed.")
+    print(f"  Network created: {net_file}")
+
+    # Network.Settings — set centroids only
+    # UseLinkTypes omitted entirely — the network must already embed
+    # a type field from LinkTypeInfo before Settings can enable it.
+    # If link type reporting is not needed, leave UseLinkTypes out.
+    net_set = dk.CreateObject("Network.Settings", None)
+    net_set.Network = net_file
+    net_set.CentroidFilter = "TAZ <> null"
+    net_set.UseLinkTypes = True
+    ok2 = net_set.Run()
+    if not ok2:
+        raise RuntimeError("Network.Settings failed.")
+    print("  Centroids configured.")
+
+    return net_file
+
+
+# %%
+def run_skims(dk: caliperpy.Gisdk, net_file: str, skim_output: str = "Script_Skim.mtx") -> str:
+    """
+    Network.Skims — all-pairs shortest path travel time matrix.
+    Docs: GISDK/api/networkskims.htm
+    """
+    skim_file = os.path.join(MODEL_DIR, skim_output)
+    obj = dk.CreateObject("Network.Skims", None)
+    obj.Network      = net_file
+    obj.LayerDB      = os.path.join(MODEL_DIR, "network.dbd")
+    obj.Origins      = "TAZ <> null"
+    obj.Destinations = "TAZ <> null"
+    obj.Minimize     = "Time"
+    obj.AddSkimField(["Time", "All"])
+    obj.OutputMatrix({
+        "MatrixFile":  skim_file,
+        "Matrix":      "Shortest Path",
+        "Compression": True,
+    })
+    ok = obj.Run()
+    if not ok:
+        raise RuntimeError("Network.Skims failed.")
+    print(f"  Skim matrix → {skim_file}")
+    return skim_file
 
 # Growth factor for Task 1B / Task 3 scenarios

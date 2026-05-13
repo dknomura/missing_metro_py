@@ -42,8 +42,8 @@ import pandas as pd
 import caliperpy
 
 from transcad.constants import MODEL_DIR
-from transcad.run_cross_classification import run_attractions, run_balancing, run_cross_classification
-from transcad.caliper_helpers import get_bottlenecks, get_dk, open_taz
+from transcad.caliper_4_step_model import build_network, run_attractions, run_balancing, run_cross_classification, run_skims
+from transcad.caliper_helpers import get_bottlenecks, get_dk, open_taz, view_bin
 from transcad.caliper_helpers import scale_taz_fields, sum_flow_field
 
 
@@ -60,77 +60,18 @@ dk = get_dk()
 taz_vw          = open_taz(dk)                          # open once
 prods_file, prod_vw = run_cross_classification(dk, taz_vw)
 run_attractions(dk, taz_vw)  
-pa = run_balancing(dk, taz_vw, prod_vw)                            # reuse same view
+pa = run_balancing(dk, taz_vw, prod_vw)  
+net_file = build_network(dk)                          # reuse same view
 # %%
 
-# view_bin(dk, taz_vw)
-# %%
-
-def build_network(dk: caliperpy.Gisdk, net_output: str = "Script_Network.net") -> str:
-    """
-    Network.Create + Network.Settings
-    Docs: GISDK/api/networksettings.htm
-    """
-    net_file = os.path.join(MODEL_DIR, net_output)
-
-    net_obj = dk.CreateObject("Network.Create")
-    net_obj.LayerDB        = os.path.join(MODEL_DIR, "network.dbd")
-    net_obj.TimeUnits      = "Minutes"
-    net_obj.OutNetworkName = net_file
-
-    net_obj.AddLinkField({"Name": "Time",     "Field": "TIME",
-                           "IsTimeField": True})
-    net_obj.AddLinkField({"Name": "Capacity", "Field": ["AB_CAPACITY",
-                                                          "BA_CAPACITY"]})
-    net_obj.AddLinkField({"Name": "Alpha",    "Field": "ALPHA"})
-    net_obj.AddLinkField({"Name": "Beta",     "Field": "BETA"})
-
-    ok = net_obj.Run()
-    if not ok:
-        raise RuntimeError("Network.Create failed.")
-
-    net_set = dk.CreateObject("Network.Settings", {"Network": net_file})
-    net_set.CentroidFilter = "TAZ <> null"
-    net_set.UseLinkTypes   = True
-    ok2 = net_set.Run()
-    if not ok2:
-        raise RuntimeError("Network.Settings failed.")
-    print(f"  Network → {net_file}")
-    return net_file
-
-
-def run_skims(dk: caliperpy.Gisdk, net_file: str, skim_output: str = "Script_Skim.mtx") -> str:
-    """
-    Network.Skims — all-pairs shortest path travel time matrix.
-    Docs: GISDK/api/networkskims.htm
-    """
-    skim_file = os.path.join(MODEL_DIR, skim_output)
-    obj = dk.CreateObject("Network.Skims")
-    obj.Network      = net_file
-    obj.LayerDB      = os.path.join(MODEL_DIR, "network.dbd")
-    obj.Origins      = "TAZ <> null"
-    obj.Destinations = "TAZ <> null"
-    obj.Minimize     = "Time"
-    obj.AddSkimField(["Time", "All"])
-    obj.OutputMatrix({
-        "MatrixFile":  skim_file,
-        "Matrix":      "Shortest Path",
-        "Compression": True,
-    })
-    ok = obj.Run()
-    if not ok:
-        raise RuntimeError("Network.Skims failed.")
-    print(f"  Skim matrix → {skim_file}")
-    return skim_file
-
-
+view_bin(dk, pa)
 def run_intrazonal(dk: caliperpy.Gisdk, skim_file: str):
     """
     Distribution.Intrazonal — fill diagonal of skim matrix.
     Docs: GISDK/api/distributionintrazonal.htm
     Factor = 0.5 per tutorial (half the average of nearest neighbours).
     """
-    obj = dk.CreateObject("Distribution.Intrazonal")
+    obj = dk.CreateObject("Distribution.Intrazonal", None)
     obj.Factor    = 0.5
     obj.Neighbors = 3
     obj.SetMatrix({"MatrixFile": skim_file, "MatrixCore": "Shortest Path"})
@@ -157,7 +98,7 @@ def run_gravity(dk: caliperpy.Gisdk, pa_file: str, skim_file: str,
     }
     ff_table = os.path.join(MODEL_DIR, "FFDATA.DBF")
 
-    obj = dk.CreateObject("Distribution.Gravity")
+    obj = dk.CreateObject("Distribution.Gravity", None)
     obj.CalculateTLD = True
     obj.AddDataSource({"TableName": pa_file})
 
@@ -201,7 +142,7 @@ def run_pa2od(dk: caliperpy.Gisdk, gravity_file: str,
     Docs: GISDK/api/distributionpa2od.htm
     """
     od_out = os.path.join(MODEL_DIR, output_file)
-    o = dk.CreateObject("Distribution.PA2OD")
+    o = dk.CreateObject("Distribution.PA2OD", None)
     o.Matrix(gravity_file)
     o.Daily        = True
     o.ReportByHour = False
@@ -234,7 +175,7 @@ def run_assignment(dk: caliperpy.Gisdk, net_file: str, od_file: str,
     """
     flow_bin = os.path.join(MODEL_DIR, flow_output)
 
-    obj = dk.CreateObject("Network.Assignment")
+    obj = dk.CreateObject("Network.Assignment", None)
     obj.LayerDB     = os.path.join(MODEL_DIR, "network.dbd")
     obj.Network     = net_file
     obj.Method      = "CUE"
@@ -382,7 +323,7 @@ def run_full_model(dk: caliperpy.Gisdk,
         occ.update(occupancy_overrides)
 
     od_out = os.path.join(MODEL_DIR, od_output)
-    o = dk.CreateObject("Distribution.PA2OD")
+    o = dk.CreateObject("Distribution.PA2OD", None)
     o.Matrix(grav)
     o.Daily = True
     o.ReportByHour = False
