@@ -92,7 +92,6 @@ def close_all_views(dk):
     Call this before deleting output files.
     GetViews(None) returns [view_names_array, current_index, current_name].
     """
-    close_all_matrices(dk)
     try:
         view_info = dk.GetViews(None)
         view_names = view_info[0]          # element 1 = array of view name strings
@@ -105,9 +104,6 @@ def close_all_views(dk):
             print(f"  Closed {len(view_names)} open views")
     except Exception:
         pass
-
-def close_all_matrices(dk):
-    pass
 
 def _delete_if_exists(path: str, dk=None):
     """Delete file + companion descriptor."""

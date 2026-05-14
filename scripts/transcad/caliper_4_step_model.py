@@ -1,16 +1,17 @@
 import os
 import caliperpy
 from transcad.constants import MODEL_DIR
-from transcad.caliper_helpers import _delete_if_exists, add_field, close_all_matrices, close_all_views
+from transcad.caliper_helpers import _delete_if_exists, add_field
 
 
 def run_cross_classification(
         dk: caliperpy.Gisdk,
-        taz_vw:       str  = None,            # already-open TAZ view (required)
+        taz_vw:       str  = None,
         output_file:  str  = "Script_Productions.bin",
+        taz_bin:      str  = "taz.bin",
         rates_table:  str  = "PRATES.BIN",
         rates_fields_by_purpose: dict = None,
-        segment_by_classification: dict = None):
+        segment_by_classification: dict = None):   
     """
     Trip productions via cross-classification.
     taz_vw must be passed — it is opened once in open_taz() and reused.
@@ -30,7 +31,7 @@ def run_cross_classification(
 
     o = dk.CreateObject("Generation.CrossClass", None)
     o.RatesTable = os.path.join(MODEL_DIR, rates_table)
-    o.DataFile({"FileName": os.path.join(MODEL_DIR, "taz.bin")})
+    o.DataFile({"FileName": os.path.join(MODEL_DIR, taz_bin)})
     o.OutputFile = output_path
 
     for purpose, rate_field in rates_fields_by_purpose.items():
@@ -335,7 +336,6 @@ def run_gravity(dk: caliperpy.Gisdk,
     """
     print("\n--- Step 3: Trip Distribution (Gravity Model) ---")
     gravity_out = os.path.join(MODEL_DIR, output_file)
-    close_all_matrices(dk)
     _delete_if_exists(gravity_out, dk)
 
     sp_mat = {
@@ -397,7 +397,6 @@ def run_pa2od(dk: caliperpy.Gisdk,
     print("\n--- Step 4: PA to OD ---")
 
     od_out = os.path.join(MODEL_DIR, output_file)
-    close_all_matrices(dk)
     _delete_if_exists(od_out, dk)
 
     occ = {"HBW": 1.1, "HBNW": 1.3, "NHB": 1.5, "TRUCKTAXI": 1.0}
@@ -441,7 +440,6 @@ def run_assignment(dk: caliperpy.Gisdk,
     from transcad.caliper_helpers import get_bottlenecks
 
     flow_bin = os.path.join(MODEL_DIR, flow_output)
-    close_all_matrices(dk)
     _delete_if_exists(flow_bin)
 
     # ── Build TAZ→NodeID index on OD matrix ──────────────────────────────

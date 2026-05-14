@@ -43,6 +43,7 @@ from transcad.caliper_helpers import (
 try: caliperpy.TransCAD.disconnect()
 except: pass
 import importlib
+import time
 importlib.reload(caliperpy)
 
 # TAZ fields to scale for future scenario
@@ -58,22 +59,6 @@ dk = get_dk()
 # ──────────────────────────────────────────────────────────────────────────────
 
 # %%
-import time
-ts = str(int(time.time()))
-
-close_all_views(dk)
-taz_vw              = open_taz(dk)
-prods_file, prod_vw = run_cross_classification(dk, taz_vw)
-run_attractions(dk, taz_vw)
-pa                  = run_balancing(dk, taz_vw, prod_vw)
-net_file            = build_network(dk)
-skim_file, skim_core = run_skims(dk, net_file)
-run_intrazonal(dk, skim_file, skim_core)
-grav    = run_gravity(dk, pa, skim_file, skim_core,  output_file=f"grav_{ts}.mtx")
-od_file = run_pa2od(dk, grav,                        output_file=f"od_{ts}.mtx")
-results = run_assignment(dk, net_file, od_file,      flow_output=f"flow_{ts}.bin")
-print(results)
-# %%
 # ──────────────────────────────────────────────────────────────────────────────
 # FULL MODEL PIPELINE
 # ──────────────────────────────────────────────────────────────────────────────
@@ -85,9 +70,10 @@ def run_full_model(
         prod_output:         str   = "Script_Productions.bin",
         pa_output:           str   = "Script_PA.bin",
         skim_output:         str   = "Script_Skim.mtx",
-        gravity_output:      str   = "Script_PA.mtx",
-        od_output:           str   = "Script_OD.mtx",
         flow_output:         str   = "Script_Daily_Assign.bin",
+        taz_bin:             str   = "taz.bin",
+        gravity_output:      str   = None,
+        od_output:           str   = None,
         # Sensitivity levers
         prod_rate_scale:     float = None,   # Step 1: scale _P fields
         attr_coeff_scale:    float = None,   # Step 1: scale _A fields
@@ -101,13 +87,18 @@ def run_full_model(
     print(f"\n{'='*60}")
     print(f"  SCENARIO: {scenario_label}")
     print(f"{'='*60}")
+    ts = str(int(time.time()))
+    gravity_base = os.path.splitext(gravity_output)[0] if gravity_output else "grav"
+    od_base      = os.path.splitext(od_output)[0]      if od_output      else "od"
+    gravity_output = f"{gravity_base}_{scenario_label}_{ts}.mtx"
+    od_output      = f"{od_base}_{scenario_label}_{ts}.mtx"
 
     # ── Step 1: Trip Generation ───────────────────────────────────────────
     print("\n[1] Trip Generation")
     close_all_views(dk)
-    taz_vw              = open_taz(dk)
+    taz_vw = open_taz(dk, taz_bin=taz_bin)
     prods_file, prod_vw = run_cross_classification(
-        dk, taz_vw, output_file=prod_output
+        dk, taz_vw, output_file=prod_output, taz_bin=taz_bin    
     )
 
     if prod_rate_scale is not None:
@@ -198,12 +189,11 @@ def task_1b_no_build(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
 
     results = run_full_model(
         dk,
+        taz_bin        = "taz_future.bin",
         scenario_label = "1B_NoBuild_Future",
         prod_output    = "Future_Productions.bin",
         pa_output      = "Future_PA.bin",
         skim_output    = "Future_Skim.mtx",
-        gravity_output = "Future_PA.mtx",
-        od_output      = "Future_OD.mtx",
         flow_output    = "Future_Daily_Assign.bin",
     )
 
@@ -233,10 +223,15 @@ def task_1c_lanes_needed(bottlenecks_df: pd.DataFrame,
     df = bottlenecks_df.copy()
 
     def extra_lanes(row):
-        flow     = max(row.get("AB_Flow", 0) or 0,
-                       row.get("BA_Flow", 0) or 0)
-        capacity = max(row.get("AB_CAPACITY", 0) or 0,
-                       row.get("BA_CAPACITY", 0) or 0)
+        ab_voc  = row.get("AB_VOC")  or 0
+        ba_voc  = row.get("BA_VOC")  or 0
+        ab_flow = row.get("AB_Flow") or 0
+        ba_flow = row.get("BA_Flow") or 0
+        # Derive capacity from flow / VOC
+        ab_cap = ab_flow / ab_voc if ab_voc > 0 else 0
+        ba_cap = ba_flow / ba_voc if ba_voc > 0 else 0
+        flow     = max(ab_flow, ba_flow)
+        capacity = max(ab_cap,  ba_cap)
         if capacity == 0:
             return None
         shortfall = flow - capacity
@@ -244,11 +239,10 @@ def task_1c_lanes_needed(bottlenecks_df: pd.DataFrame,
 
     df["Extra_Lanes_Needed"] = df.apply(extra_lanes, axis=1)
     show = [c for c in ["ID1", "AB_VOC", "BA_VOC", "AB_Flow", "BA_Flow",
-                         "AB_CAPACITY", "BA_CAPACITY", "Extra_Lanes_Needed"]
+                         "AB_VMT", "BA_VMT", "Extra_Lanes_Needed"]
             if c in df.columns]
     print(df[show].head(20).to_string(index=False))
     return df
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TASK 3B — SENSITIVITY ANALYSIS
