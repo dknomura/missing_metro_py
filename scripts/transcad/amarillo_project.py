@@ -11,7 +11,10 @@
 # %%
 import importlib
 import transcad.caliper_4_step_model as m
+import transcad.caliper_helpers as h
+
 importlib.reload(m)
+importlib.reload(h)
 
 import os
 import shutil
@@ -34,6 +37,7 @@ from transcad.caliper_helpers import (
     get_dk,
     open_taz,
     close_all_views,
+    set_data_vector_scaled,
     view_mtx,
     view_bin,
     get_bottlenecks,
@@ -104,17 +108,15 @@ def run_full_model(
     if prod_rate_scale is not None:
         print(f"  Scaling productions by {prod_rate_scale:.3f}")
         for field in ["HBW_P", "HBNW_P", "NHB_P", "TRUCKTAXI_P"]:
-            v = dk.GetDataVector(prod_vw + "|", field, None)
-            dk.SetDataVector(prod_vw + "|", field, v * prod_rate_scale, None)
-
+            set_data_vector_scaled(dk, prod_vw + "|", field, prod_rate_scale)    
+    
     run_attractions(dk, taz_vw)
 
     if attr_coeff_scale is not None:
         print(f"  Scaling attractions by {attr_coeff_scale:.3f}")
         for field in ["HBW_A", "HBNW_A", "NHB_A", "TRUCKTAXI_A"]:
-            v = dk.GetDataVector(taz_vw + "|", field, None)
-            dk.SetDataVector(taz_vw + "|", field, v * attr_coeff_scale, None)
-
+            set_data_vector_scaled(dk, taz_vw + "|", field, attr_coeff_scale)
+            
     pa = run_balancing(dk, taz_vw, prod_vw, output_file=pa_output)
 
     # ── Step 2: Network & Skim ────────────────────────────────────────────
@@ -383,3 +385,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+# %%

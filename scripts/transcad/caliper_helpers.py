@@ -69,13 +69,25 @@ def scale_taz_fields(dk: caliperpy.Gisdk, taz_bin_path: str, fields: list, facto
       OpenTable / GetDataVector / SetDataVector / CloseView
     """
     shutil.copy2(taz_bin_path, output_bin)
+    # Copy the .dcb descriptor — required by TransCAD to open the .bin
+    dcb_src = taz_bin_path.replace(".bin", ".dcb")
+    dcb_dst = output_bin.replace(".bin", ".dcb")
+    if os.path.exists(dcb_src):
+        shutil.copy2(dcb_src, dcb_dst)
+
     vw = dk.OpenTable("ScaleTAZ", "FFB", [output_bin, None])
+    dk.SetView(vw)
     for field in fields:
-        v = dk.GetDataVector(vw, field, None)
-        dk.SetDataVector(vw, field, v * factor, None)
+        set_data_vector_scaled(dk, vw + "|", field, factor)
     dk.CloseView(vw)
+    
     print(f"  Scaled {fields} by {factor:.2f}  →  {output_bin}")
 
+def set_data_vector_scaled(dk, view_set: str, field: str, factor: float):
+    """Scale a field in-place using GetDataVector/SetDataVector safely."""
+    v_arr  = dk.VectorToArray(dk.GetDataVector(view_set, field, None))
+    scaled = dk.ArrayToVector([x * factor if x is not None else 0.0 for x in v_arr])
+    dk.SetDataVector(view_set, field, scaled, None)
 
 def sum_flow_field(dk: caliperpy.Gisdk, flow_bin: str, field: str) -> float:
     """Open a flow table .bin, sum one field, return the total."""
