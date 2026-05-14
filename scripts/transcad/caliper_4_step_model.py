@@ -349,7 +349,7 @@ def run_gravity(dk: caliperpy.Gisdk,
 
     obj = dk.CreateObject("Distribution.Gravity", None)
     obj.CalculateTLD = True
-    obj.AddDataSource({"TableName": pa_file})
+    obj.AddDatasource({"TableName": pa_file})
 
     for purpose, ff_field in [("HBW",       "HBW"),
                                ("HBNW",      "HBNW"),
@@ -490,6 +490,8 @@ def run_assignment(dk: caliperpy.Gisdk,
 
     if demand_multiplier != 1.0:
         obj.DemandMultiplier = demand_multiplier
+    
+    obj.ResetClasses()
 
     obj.DemandMatrix({
         "MatrixFile":  od_file,
@@ -500,6 +502,7 @@ def run_assignment(dk: caliperpy.Gisdk,
 
     for core in od_cores:
         obj.AddClass({"Demand": core})
+
 
     obj.DelayFunction = {
         "Function": "bpr.vdf",

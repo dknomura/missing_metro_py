@@ -63,6 +63,7 @@ dk = get_dk()
 # ──────────────────────────────────────────────────────────────────────────────
 
 # %%
+# %%
 # ──────────────────────────────────────────────────────────────────────────────
 # FULL MODEL PIPELINE
 # ──────────────────────────────────────────────────────────────────────────────
@@ -71,11 +72,11 @@ dk = get_dk()
 def run_full_model(
         dk: caliperpy.Gisdk,
         scenario_label:      str   = "Baseline",
+        taz_bin:             str   = "taz.bin",
         prod_output:         str   = "Script_Productions.bin",
         pa_output:           str   = "Script_PA.bin",
         skim_output:         str   = "Script_Skim.mtx",
         flow_output:         str   = "Script_Daily_Assign.bin",
-        taz_bin:             str   = "taz.bin",
         gravity_output:      str   = None,
         od_output:           str   = None,
         # Sensitivity levers
@@ -92,6 +93,14 @@ def run_full_model(
     print(f"  SCENARIO: {scenario_label}")
     print(f"{'='*60}")
     ts = str(int(time.time()))
+    prod_base = os.path.splitext(prod_output)[0] if prod_output else "prod"
+    prod_output = f"{prod_base}_{scenario_label}_{ts}.bin"
+    pa_base = os.path.splitext(pa_output)[0] if pa_output else "pa"
+    pa_output = f"{pa_base}_{scenario_label}_{ts}.bin"
+    skim_base = os.path.splitext(skim_output)[0] if skim_output else "skim"
+    skim_output = f"{skim_base}_{scenario_label}_{ts}.mtx"
+    flow_base = os.path.splitext(flow_output)[0] if flow_output else "flow"
+    flow_output = f"{flow_base}_{scenario_label}_{ts}.bin"
     gravity_base = os.path.splitext(gravity_output)[0] if gravity_output else "grav"
     od_base      = os.path.splitext(od_output)[0]      if od_output      else "od"
     gravity_output = f"{gravity_base}_{scenario_label}_{ts}.mtx"
@@ -351,6 +360,11 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
     res["scenario"] = label
     return res
 
+# %%
+run_full_model(dk, scenario_label="DEV_Baseline_Test")
+    
+
+# %%
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MAIN
