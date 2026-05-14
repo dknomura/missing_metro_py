@@ -333,18 +333,17 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
         )
 
     MAX_ITER   = 10
-    prod_scale = 1
-    attr_scale = 1
+    prod_scale = .99
+    attr_scale = .995
     hbw_occ   = 1.10
     hbnw_occ   = 1.30
     nhb_occ    = 1.50
-    demand_mult = 1.0
 
     res = {}
     for i in range(1, MAX_ITER + 1):
         label = f"3C_iter{i}"
         print(f"\n  Iter {i}: prod={prod_scale:.2f} attr={attr_scale:.2f} "
-              f"HBNW={hbnw_occ:.2f} NHB={nhb_occ:.2f}")
+              f"HBW={hbw_occ:.2f} " f"HBNW={hbnw_occ:.2f} NHB={nhb_occ:.2f}")
 
         res = run_full_model(
             dk,
@@ -358,7 +357,6 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
             flow_output         = f"{label}_Flow.bin",
             prod_rate_scale     = prod_scale,
             attr_coeff_scale    = attr_scale,
-            demand_multiplier   = demand_mult,
             occupancy_overrides = {"HBW": hbw_occ, "HBNW": hbnw_occ, "NHB": nhb_occ},
         )
 
@@ -368,14 +366,14 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
         if res["VMT"] <= baseline_vmt:
             print(f"\n  ✓ Target achieved in iteration {i}!")
             break
-        demand_mult -= 0.01  # scale down demand for next iteration
-        prod_scale -= 0.025
-        attr_scale -= 0.01
-        hbw_occ   += 0.01
-        hbnw_occ   += 0.01
-        nhb_occ    += 0.01
-    else:
-        print("\n  ✗ Target not met — reporting best result.")
+        else:
+            print("\n  ✗ Target not met — reporting best result.")
+
+        prod_scale -= 0.01
+        attr_scale -= 0.005
+        hbw_occ   *= 1.05
+        hbnw_occ   *= 1.05
+        nhb_occ    *= 1.05
 
     res["scenario"] = label
     return res
@@ -383,7 +381,289 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
 # %%
 # %%
 # Quick test
-res = run_full_model(dk, scenario_label="test_dm")
+def run_hourly_assignment(
+        dk:             caliperpy.Gisdk,
+        gravity_file:   str,
+        net_file:       str,
+        scenario_label: str  = "Hourly",
+        hours:          list = None,          # None = all 24 hours
+        occupancy_overrides: dict = None,
+) -> dict:
+    """
+    For each hour (or a specified subset), run PA2OD using HourlyLookup.bin,
+    add IE/EE external trips, run traffic assignment, and return results.
+
+    Returns dict keyed by hour: {hour: {VMT, VHT, flow_bin, bottlenecks_df}}
+    """
+    import time as _time
+    import collections
+    import numpy as np
+
+    if hours is None:
+        hours = list(range(24))
+
+    hourly_bin = os.path.join(MODEL_DIR, "HourlyLookup.bin")
+    ie_mtx     = os.path.join(MODEL_DIR, "ie.mtx")
+    ee_bin     = os.path.join(MODEL_DIR, "EE Trips.bin")
+
+    occ = {"HBW": 1.1, "HBNW": 1.3, "NHB": 1.5, "TRUCKTAXI": 1.0}
+    if occupancy_overrides:
+        occ.update(occupancy_overrides)
+
+    # Verify HourlyLookup fields
+    vw_check = dk.OpenTable("HourlyCheck", "FFB", [hourly_bin, None])
+    fields, _ = dk.GetFields(vw_check, "All")
+    print(f"HourlyLookup fields: {fields}")
+    dk.CloseView(vw_check)
+
+    results = {}
+
+    for hour in hours:
+        ts    = str(int(_time.time()))
+        label = f"{scenario_label}_H{hour:02d}"
+        print(f"\n{'='*50}")
+        print(f"  HOUR {hour:02d}:00 — {label}")
+        print(f"{'='*50}")
+
+        # ── PA2OD for this hour ───────────────────────────────────────────
+        od_file = os.path.join(MODEL_DIR,
+                    f"ScriptOutput/od_{label}_{ts}.mtx")
+        _delete_if_exists(od_file)
+
+        o = dk.CreateObject("Distribution.PA2OD", None)
+        o.Matrix(gravity_file)
+        o.LoadRateTable(hourly_bin)
+        o.TimePeriod(hour, hour + 1)   # single hour slice
+        o.Daily        = False
+        o.ReportByHour = False         # one combined output for the hour
+
+        # HBW, HBNW, NHB use hourly rates; TRUCKTAXI uses flat daily split
+        o.AddPurpose({
+            "Name":           "HBW",
+            "DepartureField": "DEP_HBW",
+            "ReturnField":    "RET_HBW",
+            "Occupancy":      occ["HBW"],
+        })
+        o.AddPurpose({
+            "Name":           "HBNW",
+            "DepartureField": "DEP_HBNW",
+            "ReturnField":    "RET_HBNW",
+            "Occupancy":      occ["HBNW"],
+        })
+        o.AddPurpose({
+            "Name":           "NHB",
+            "DepartureField": "DEP_NHB",
+            "ReturnField":    "RET_NHB",
+            "Occupancy":      occ["NHB"],
+        })
+        # TRUCKTAXI — no hourly rates in lookup, use flat 1/24 share
+        o.AddPurpose({
+            "Name":      "TRUCKTAXI",
+            "Occupancy": occ["TRUCKTAXI"],
+        })
+
+        o.OutputMatrix(od_file)
+        ok = o.Run()
+        if not ok:
+            print(f"  WARNING: PA2OD failed for hour {hour} — skipping")
+            continue
+        print(f"  OD matrix → {od_file}")
+
+        # ── Add IE/EE scaled to this hour ─────────────────────────────────
+        # IE and EE are daily totals — scale by hourly fraction (1/24 approx)
+        # A more accurate approach uses DEP_ALL from HourlyLookup
+        vw_hl   = dk.OpenTable("HourlyLookup2", "FFB", [hourly_bin, None])
+        dep_all = dk.VectorToArray(dk.GetDataVector(vw_hl + "|", "DEP_ALL", None))
+        hour_vals = dk.VectorToArray(dk.GetDataVector(vw_hl + "|", "HOUR",   None))
+        dk.CloseView(vw_hl)
+
+        # Find the fraction for this hour
+        hour_fraction = 1.0 / 24.0  # fallback
+        for h, dep in zip(hour_vals, dep_all):
+            if h is not None and int(float(h)) == hour and dep is not None:
+                hour_fraction = float(dep) / 100.0
+                break
+        print(f"  Hour fraction (DEP_ALL): {hour_fraction:.4f}")
+
+        # Add IE/EE cores to OD matrix scaled by hour fraction
+        od_matrix = dk.OpenMatrix(od_file, "True")
+        od_cores  = list(dk.GetMatrixCoreNames(od_matrix))
+
+        if "IE (0-24)" not in od_cores:
+            dk.AddMatrixCore(od_matrix, "IE (0-24)")
+        if "EE (0-24)" not in od_cores:
+            dk.AddMatrixCore(od_matrix, "EE (0-24)")
+
+        # IE — scale daily matrix by hour fraction
+        ie_matrix    = dk.OpenMatrix(ie_mtx, "True")
+        ie_core_name = dk.GetMatrixCoreNames(ie_matrix)[0]
+        ie_mc = dk.CreateMatrixCurrency(ie_matrix, ie_core_name, None, None, None)
+        od_ie = dk.CreateMatrixCurrency(od_matrix, "IE (0-24)",  None, None, None)
+
+        row_ids = dk.VectorToArray(dk.GetMatrixVector(ie_mc, [["Index", "Row"]]))
+        for row_id in row_ids:
+            if row_id is None:
+                continue
+            row_vec  = dk.VectorToArray(dk.GetMatrixVector(ie_mc, [["Row", row_id]]))
+            scaled   = [v * hour_fraction if v is not None else 0.0
+                        for v in row_vec]
+            dk.SetMatrixVector(od_ie, dk.ArrayToVector(scaled), [["Row", row_id]])
+        print("  IE added (scaled)")
+
+        # EE — scale sparse table by hour fraction
+        ee_vw   = dk.OpenTable("EETrips_h", "FFB", [ee_bin, None])
+        origins = dk.VectorToArray(dk.GetDataVector(ee_vw + "|", "Origin",      None))
+        dests   = dk.VectorToArray(dk.GetDataVector(ee_vw + "|", "Destination", None))
+        flows   = dk.VectorToArray(dk.GetDataVector(ee_vw + "|", "Flow",        None))
+        dk.CloseView(ee_vw)
+
+        od_ee   = dk.CreateMatrixCurrency(od_matrix, "EE (0-24)", None, None, None)
+        col_ids = dk.VectorToArray(dk.GetMatrixVector(od_ee, [["Index", "Column"]]))
+        col_pos = {int(float(c)): i for i, c in enumerate(col_ids) if c is not None}
+
+        row_flows = collections.defaultdict(dict)
+        for o_id, d_id, f in zip(origins, dests, flows):
+            if f is not None and f > 0:
+                row_flows[int(float(o_id))][int(float(d_id))] = \
+                    float(f) * hour_fraction
+
+        for row_id, cell_dict in row_flows.items():
+            vals = [0.0] * len(col_ids)
+            for col_id, val in cell_dict.items():
+                if col_id in col_pos:
+                    vals[col_pos[col_id]] = val
+            dk.SetMatrixVector(od_ee, dk.ArrayToVector(vals), [["Row", row_id]])
+        print("  EE added (scaled)")
+
+        # Verify totals
+        total = 0
+        for core in dk.GetMatrixCoreNames(od_matrix):
+            mc  = dk.CreateMatrixCurrency(od_matrix, core, None, None, None)
+            rs  = dk.VectorToArray(dk.GetMatrixVector(mc, [["Marginal", "Row Sum"]]))
+            ct  = sum(x for x in rs if x is not None)
+            print(f"    {core}: {ct:,.0f}")
+            total += ct
+        print(f"    Total: {total:,.0f}")
+
+        # ── Assignment ────────────────────────────────────────────────────
+        flow_output = f"ScriptOutput/flow_{label}_{ts}.bin"
+        flow_bin    = os.path.join(MODEL_DIR, flow_output)
+        _delete_if_exists(flow_bin)
+
+        # Build TAZ→NodeID index
+        node_bin = os.path.join(MODEL_DIR, "Network_.bin")
+        try:
+            views = dk.GetViews(None)[0] or []
+            for vw in (views or []):
+                if vw.lower().startswith("node"):
+                    try: dk.CloseView(vw)
+                    except: pass
+        except: pass
+
+        node_vw = dk.OpenTable("Nodes", "FFB", [node_bin, None])
+        dk.SetView(node_vw)
+        dk.SelectByQuery("Centroids", "Several",
+                         "Select * where TAZ <> null", None)
+        dk.CreateMatrixIndex(
+            "TAZ to Node ID", od_matrix, "Both",
+            node_vw + "|Centroids", "TAZ", "ID"
+        )
+        dk.CloseView(node_vw)
+
+        net_db  = os.path.join(MODEL_DIR, "network.dbd")
+        obj     = dk.CreateObject("Network.Assignment", None)
+        obj.LayerDB     = net_db
+        obj.Network     = net_file
+        obj.Method      = "CUE"
+        obj.Iterations  = 100
+        obj.Convergence = 0.0001
+        obj.FlowTable   = flow_bin
+
+        obj.ResetClasses()
+        obj.DemandMatrix({
+            "MatrixFile":  od_file,
+            "RowIndex":    "TAZ to Node ID",
+            "ColumnIndex": "TAZ to Node ID",
+        })
+        all_cores = dk.GetMatrixCoreNames(od_matrix)
+        for core in all_cores:
+            obj.AddClass({"Demand": core})
+
+        obj.DelayFunction = {
+            "Function": "bpr.vdf",
+            "Fields":   ["Time", "Capacity", "Alpha", "Beta", "None"],
+        }
+
+        ok = obj.Run()
+        if not ok:
+            print(f"  WARNING: Assignment failed for hour {hour}")
+            del obj
+            continue
+
+        task_results = obj.GetTaskResults()
+        result_dict  = dict(task_results)
+        vmt = float(result_dict.get("VMT w/o Centroids",
+                    result_dict.get("Total VMT", 0)))
+        vht = float(result_dict.get("VHT w/o Centroids",
+                    result_dict.get("Total VHT", 0)))
+        del obj
+
+        # Bottlenecks
+        flow_vw_name = f"Flow_H{hour:02d}_{ts}"
+        try: dk.CloseView(flow_vw_name)
+        except: pass
+        flow_vw      = dk.OpenTable(flow_vw_name, "FFB", [flow_bin, None])
+        max_voc_vals = dk.VectorToArray(
+                           dk.GetDataVector(flow_vw + "|", "Max_VOC", None))
+        id1_vals     = dk.VectorToArray(
+                           dk.GetDataVector(flow_vw + "|", "ID1",     None))
+        tot_flow     = dk.VectorToArray(
+                           dk.GetDataVector(flow_vw + "|", "Tot_Flow",None))
+        tot_vmt_vals = dk.VectorToArray(
+                           dk.GetDataVector(flow_vw + "|", "Tot_VMT", None))
+        try: dk.CloseView(flow_vw)
+        except: pass
+
+        rows = []
+        for id1, voc, flow, tvmt in zip(id1_vals, max_voc_vals,
+                                         tot_flow, tot_vmt_vals):
+            if voc is not None and float(voc) >= 1.0:
+                rows.append({
+                    "ID1":      id1,
+                    "Max_VOC":  float(voc),
+                    "Tot_Flow": float(flow) if flow is not None else None,
+                    "Tot_VMT":  float(tvmt) if tvmt is not None else None,
+                })
+        bottlenecks = (
+            pd.DataFrame(rows).sort_values("Max_VOC", ascending=False)
+            if rows else
+            pd.DataFrame(columns=["ID1", "Max_VOC", "Tot_Flow", "Tot_VMT"])
+        )
+
+        print(f"  VMT: {vmt:,.0f}   VHT: {vht:,.0f}")
+        print(f"  Bottlenecks (V/C >= 1.0): {len(bottlenecks)}")
+        if len(bottlenecks) > 0:
+            print(bottlenecks.to_string(index=False))
+
+        results[hour] = {
+            "hour":           hour,
+            "VMT":            vmt,
+            "VHT":            vht,
+            "flow_bin":       flow_bin,
+            "bottlenecks_df": bottlenecks,
+            "od_file":        od_file,
+        }
+
+    # ── Summary table ─────────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print("  HOURLY SUMMARY")
+    print(f"{'='*60}")
+    print(f"  {'Hour':>6}  {'VMT':>12}  {'VHT':>10}  {'Bottlenecks':>12}")
+    for h, r in sorted(results.items()):
+        print(f"  {h:02d}:00   {r['VMT']:>12,.0f}  "
+              f"{r['VHT']:>10,.0f}  {len(r['bottlenecks_df']):>12}")
+
+    return results
 # %%
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -422,4 +702,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+# %%
 # %%

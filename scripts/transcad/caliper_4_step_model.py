@@ -587,7 +587,7 @@ def run_assignment(dk: caliperpy.Gisdk,
     obj = dk.CreateObject("Network.Assignment", None)
     obj.LayerDB     = net_db
     obj.Network     = net_file
-    obj.Method      = "CUE"
+    obj.Method      = "UE"
     obj.Iterations  = 100
     obj.Convergence = 0.0001
     obj.FlowTable   = flow_bin
