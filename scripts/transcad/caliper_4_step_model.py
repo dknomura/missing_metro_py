@@ -1,4 +1,6 @@
 import os
+
+import pandas as pd
 import caliperpy
 from transcad.constants import MODEL_DIR
 from transcad.caliper_helpers import _delete_if_exists, add_field
@@ -47,6 +49,33 @@ def run_cross_classification(
     print(f"  Productions → {output_path}")
     print(f"  Productions view: '{prod_vw}'")
     return output_path, prod_vw
+
+
+def apply_special_generators(dk, prod_bin: str, taz_vw: str):
+    print("\n--- Step 1A2: Special Generators ---")
+
+    sp_map = {
+        "SP_HBW":       "HBW_P",
+        "SP_HBNW":      "HBNW_P",
+        "SP_NHB":       "NHB_P",
+        "SP_TRUCKTAXI": "TRUCKTAXI_P",
+    }
+
+    for sp_field, prod_field in sp_map.items():
+        sp_vals   = dk.VectorToArray(dk.GetDataVector(taz_vw + "|", sp_field,   None))
+        prod_vals = dk.VectorToArray(dk.GetDataVector(prod_bin + "|", prod_field, None))
+
+        new_vals = [
+            sp if (sp is not None and sp > 0) else p
+            for sp, p in zip(sp_vals, prod_vals)
+        ]
+        replaced = sum(1 for sp in sp_vals if sp is not None and sp > 0)
+        print(f"  {prod_field}: replaced {replaced} zones with SP values")
+
+        dk.SetView("Productions")
+        dk.SetDataVector("Productions" + "|", prod_field, dk.ArrayToVector(new_vals), None)
+
+    print("  Special generators applied.")
 
 
 def _rezero_field(dk, taz_vw, fld):
@@ -105,9 +134,37 @@ def run_attractions(dk: caliperpy.Gisdk, taz_vw: str):
 
     print("  Attractions done.")
 
+def apply_special_attractions(dk, taz_vw: str):
+    print("\n--- Step 1B2: Special Attractions ---")
+
+    sa_map = {
+        "SA_HBW":       "HBW_A",
+        "SA_HBNW":      "HBNW_A",
+        "SA_NHB":       "NHB_A",
+        "SA_TRUCKTAXI": "TRUCKTAXI_A",
+    }
+
+    for sa_field, attr_field in sa_map.items():
+        sa_vals   = dk.VectorToArray(dk.GetDataVector(taz_vw + "|", sa_field,   None))
+        attr_vals = dk.VectorToArray(dk.GetDataVector(taz_vw + "|", attr_field, None))
+        new_vals  = [
+            sa if (sa is not None and sa > 0) else a
+            for sa, a in zip(sa_vals, attr_vals)
+        ]
+        replaced = sum(1 for sa in sa_vals if sa is not None and sa > 0)
+        dk.SetView(taz_vw)
+        dk.SetDataVector(taz_vw + "|", attr_field, dk.ArrayToVector(new_vals), None)
+        
+        # Verify the write stuck
+        check = dk.VectorToArray(dk.GetDataVector(taz_vw + "|", attr_field, None))
+        print(f"  {attr_field}: replaced {replaced} zones  sum before={sum(x for x in attr_vals if x):,.0f}  sum after={sum(x for x in check if x):,.0f}")
+
+    print("  Special attractions applied.")
+
 
 def run_balancing(dk: caliperpy.Gisdk, taz_vw: str, prod_vw: str,
-                  output_file: str = "Script_PA.bin") -> str:
+                  output_file: str = "Script_PA.bin",
+                  hold_method="HoldProductions") -> str:
     """
     Balance P and A using Generation.Balance.
     Joins taz_vw (_A fields) and prod_vw (_P fields) on TAZ ID.
@@ -146,11 +203,14 @@ def run_balancing(dk: caliperpy.Gisdk, taz_vw: str, prod_vw: str,
     obj.AddDataSource({"ViewName": joined})   # ViewName for open view, not TableName
     obj.OutputFile = pa_file
 
-    obj.AddPurpose({"Production": "HBW_P",       "Attraction": "HBW_A"})
-    obj.AddPurpose({"Production": "HBNW_P",      "Attraction": "HBNW_A"})
-    obj.AddPurpose({"Production": "NHB_P",       "Attraction": "NHB_A"})
-    obj.AddPurpose({"Production": "TRUCKTAXI_P", "Attraction": "TRUCKTAXI_A"})
-
+    obj.AddPurpose({"Production": "HBW_P",       "Attraction": "HBW_A",
+                    "Method": hold_method})
+    obj.AddPurpose({"Production": "HBNW_P",      "Attraction": "HBNW_A",
+                    "Method": hold_method})
+    obj.AddPurpose({"Production": "NHB_P",       "Attraction": "NHB_A",
+                    "Method": hold_method})
+    obj.AddPurpose({"Production": "TRUCKTAXI_P", "Attraction": "TRUCKTAXI_A",
+                    "Method": hold_method})
     ok = obj.Run()
     if not ok:
         raise RuntimeError("Generation.Balance failed.")
@@ -420,41 +480,94 @@ def run_pa2od(dk: caliperpy.Gisdk,
     print(f"  OD matrix → {od_out}")
     return od_out
 
+def add_ie_ee_to_od(dk, od_file, ie_mtx_file="ie.mtx", ee_trips_file="EE Trips.bin"):
+    print("\n--- Step 4B: Adding IE/EE External Trips ---")
+
+    od_matrix = dk.OpenMatrix(od_file, "True")
+
+    # Add cores if missing
+    od_cores = list(dk.GetMatrixCoreNames(od_matrix))
+    if "IE (0-24)" not in od_cores:
+        dk.AddMatrixCore(od_matrix, "IE (0-24)")
+    if "EE (0-24)" not in od_cores:
+        dk.AddMatrixCore(od_matrix, "EE (0-24)")
+
+    # ── IE: fill row by row ───────────────────────────────────────────────
+    ie_matrix    = dk.OpenMatrix(os.path.join(MODEL_DIR, ie_mtx_file), "True")
+    ie_core_name = dk.GetMatrixCoreNames(ie_matrix)[0]
+    ie_mc = dk.CreateMatrixCurrency(ie_matrix, ie_core_name, None, None, None)
+    od_ie = dk.CreateMatrixCurrency(od_matrix, "IE (0-24)",  None, None, None)
+
+    row_ids = dk.VectorToArray(dk.GetMatrixVector(ie_mc, [["Index", "Row"]]))
+    for row_id in row_ids:
+        if row_id is None:
+            continue
+        row_vec = dk.GetMatrixVector(ie_mc, [["Row", row_id]])
+        dk.SetMatrixVector(od_ie, row_vec, [["Row", row_id]])
+    print("  IE done")
+
+    # ── EE: group by origin, fill row by row ─────────────────────────────
+    import collections
+    import numpy as np
+
+    ee_vw   = dk.OpenTable("EETrips", "FFB", [os.path.join(MODEL_DIR, ee_trips_file), None])
+    origins = dk.VectorToArray(dk.GetDataVector(ee_vw + "|", "Origin",      None))
+    dests   = dk.VectorToArray(dk.GetDataVector(ee_vw + "|", "Destination", None))
+    flows   = dk.VectorToArray(dk.GetDataVector(ee_vw + "|", "Flow",        None))
+    dk.CloseView(ee_vw)
+
+    od_ee   = dk.CreateMatrixCurrency(od_matrix, "EE (0-24)", None, None, None)
+    col_ids = dk.VectorToArray(dk.GetMatrixVector(od_ee, [["Index", "Column"]]))
+    col_pos = {int(float(c)): i for i, c in enumerate(col_ids) if c is not None}
+
+    row_flows = collections.defaultdict(dict)
+    for o, d, f in zip(origins, dests, flows):
+        if f is not None and f > 0:
+            row_flows[int(float(o))][int(float(d))] = float(f)
+
+    for row_id, cell_dict in row_flows.items():
+        vals = [0.0] * len(col_ids)
+        for col_id, val in cell_dict.items():
+            if col_id in col_pos:
+                vals[col_pos[col_id]] = val
+        row_vec = dk.ArrayToVector(vals)
+        dk.SetMatrixVector(od_ee, row_vec, [["Row", row_id]])
+    print("  EE done")
+
+
+    # ── Verify totals ─────────────────────────────────────────────────────
+    for core in dk.GetMatrixCoreNames(od_matrix):
+        mc    = dk.CreateMatrixCurrency(od_matrix, core, None, None, None)
+        rs    = dk.VectorToArray(dk.GetMatrixVector(mc, [["Marginal", "Row Sum"]]))
+        total = sum(x for x in rs if x is not None)
+        print(f"    {core}: {total:,.0f}")
 
 def run_assignment(dk: caliperpy.Gisdk,
-                   net_file:         str,
-                   od_file:          str,
-                   flow_output:      str   = "Script_Daily_Assign.bin",
-                   demand_multiplier: float = 1.0) -> dict:
+                   net_file:          str,
+                   od_file:           str,
+                   flow_output:       str   = "Script_Daily_Assign.bin",
+                   demand_multiplier: float = 1.0,
+                   vc_threshold:      float = 1.0) -> dict:
     """
-    User Equilibrium traffic assignment (CUE) with BPR delay function.
-
-    The OD matrix must have a TAZ-to-NodeID index for the assignment to
-    match zone IDs to network node IDs. This index is built here if it
-    doesn't already exist.
-
+    CUE traffic assignment with BPR delay function.
     Returns dict: {VMT, VHT, flow_bin, bottlenecks_df}
     """
     print("\n--- Step 5: Traffic Assignment ---")
-
-    from transcad.caliper_helpers import get_bottlenecks
 
     flow_bin = os.path.join(MODEL_DIR, flow_output)
     _delete_if_exists(flow_bin)
 
     # ── Build TAZ→NodeID index on OD matrix ──────────────────────────────
-    # PA2OD writes zone IDs; assignment needs node IDs.
-    od_matrix  = dk.OpenMatrix(od_file, "True")
-    od_cores   = dk.GetMatrixCoreNames(od_matrix)
+    od_matrix = dk.OpenMatrix(od_file, "True")
+    od_cores  = dk.GetMatrixCoreNames(od_matrix)
     print(f"  OD cores: {od_cores}")
 
     net_db   = os.path.join(MODEL_DIR, "network.dbd")
     node_bin = os.path.join(MODEL_DIR, "Network_.bin")
 
-    # Close stale Nodes views to prevent :1 deduplication
     try:
         views = dk.GetViews(None)[0] or []
-        for vw in views:
+        for vw in (views or []):
             if vw.lower().startswith("node"):
                 try: dk.CloseView(vw)
                 except: pass
@@ -463,23 +576,14 @@ def run_assignment(dk: caliperpy.Gisdk,
     node_vw = dk.OpenTable("Nodes", "FFB", [node_bin, None])
     print(f"  Node view: '{node_vw}'")
     dk.SetView(node_vw)
-    dk.SelectByQuery("Centroids", "Several",
-                     "Select * where TAZ <> null", None)
-    # TAZ → Node ID (reverse of the skim index)
+    dk.SelectByQuery("Centroids", "Several", "Select * where TAZ <> null", None)
     dk.CreateMatrixIndex(
-        "TAZ to Node ID",
-        od_matrix,
-        "Both",
-        node_vw + "|Centroids",
-        "TAZ",   # old IDs = TAZ numbers (current OD matrix index)
-        "ID"     # new IDs = node IDs (needed by assignment)
+        "TAZ to Node ID", od_matrix, "Both",
+        node_vw + "|Centroids", "TAZ", "ID"
     )
     dk.CloseView(node_vw)
 
-    # Use first core as QuickSum if QuickSum doesn't exist
-    demand_core = "QuickSum" if "QuickSum" in od_cores else od_cores[0]
-    print(f"  Demand core: '{demand_core}'")
-
+    # ── Assignment ────────────────────────────────────────────────────────
     obj = dk.CreateObject("Network.Assignment", None)
     obj.LayerDB     = net_db
     obj.Network     = net_file
@@ -490,19 +594,15 @@ def run_assignment(dk: caliperpy.Gisdk,
 
     if demand_multiplier != 1.0:
         obj.DemandMultiplier = demand_multiplier
-    
-    obj.ResetClasses()
 
+    obj.ResetClasses()
     obj.DemandMatrix({
         "MatrixFile":  od_file,
-        "Matrix":      demand_core,
         "RowIndex":    "TAZ to Node ID",
         "ColumnIndex": "TAZ to Node ID",
     })
-
     for core in od_cores:
         obj.AddClass({"Demand": core})
-
 
     obj.DelayFunction = {
         "Function": "bpr.vdf",
@@ -512,22 +612,57 @@ def run_assignment(dk: caliperpy.Gisdk,
     ok = obj.Run()
     if not ok:
         raise RuntimeError("Network.Assignment failed.")
+
+    # ── Read results before releasing object ──────────────────────────────
+    task_results = obj.GetTaskResults()
+    result_dict  = dict(task_results)
+    vmt = float(result_dict.get("VMT w/o Centroids", result_dict.get("Total VMT", 0)))
+    vht = float(result_dict.get("VHT w/o Centroids", result_dict.get("Total VHT", 0)))
+
+    del obj  # release COM lock on flow table
+
     if not os.path.exists(flow_bin):
         raise RuntimeError(f"Assignment ran but flow table not found: {flow_bin}")
 
-    # ── Read VMT / VHT ────────────────────────────────────────────────────
-    # GetTaskResults() returns a tuple in caliperpy — index directly
-    task_results = obj.GetTaskResults()
-    result_dict  = dict(task_results)
+    # ── Read flow table and compute bottlenecks ───────────────────────────
+    flow_vw_name = f"Flow_{os.path.basename(flow_bin).replace('.bin', '')}"
+    try:
+        dk.CloseView(flow_vw_name)
+    except:
+        pass
+    flow_vw = dk.OpenTable(flow_vw_name, "FFB", [flow_bin, None])
 
-    vmt = float(result_dict.get("VMT w/o Centroids", result_dict.get("Total VMT", 0)))
-    vht = float(result_dict.get("VHT w/o Centroids", result_dict.get("Total VHT", 0)))    
-    
-    bottlenecks = get_bottlenecks(dk, flow_bin, vc_threshold=1.0)
+    max_voc_vals = dk.VectorToArray(dk.GetDataVector(flow_vw + "|", "Max_VOC",  None))
+    id1_vals     = dk.VectorToArray(dk.GetDataVector(flow_vw + "|", "ID1",      None))
+    tot_flow     = dk.VectorToArray(dk.GetDataVector(flow_vw + "|", "Tot_Flow", None))
+    tot_vmt_vals = dk.VectorToArray(dk.GetDataVector(flow_vw + "|", "Tot_VMT",  None))
+
+    try:
+        dk.CloseView(flow_vw)
+    except:
+        pass
+
+    rows = []
+    for id1, voc, flow, tvmt in zip(id1_vals, max_voc_vals, tot_flow, tot_vmt_vals):
+        if voc is not None and float(voc) >= vc_threshold:
+            rows.append({
+                "ID1":      id1,
+                "Max_VOC":  float(voc),
+                "Tot_Flow": float(flow) if flow is not None else None,
+                "Tot_VMT":  float(tvmt) if tvmt is not None else None,
+            })
+
+    bottlenecks = (
+        pd.DataFrame(rows).sort_values("Max_VOC", ascending=False)
+        if rows else
+        pd.DataFrame(columns=["ID1", "Max_VOC", "Tot_Flow", "Tot_VMT"])
+    )
 
     print(f"  Flow table  → {flow_bin}")
     print(f"  VMT: {vmt:,.0f}   VHT: {vht:,.0f}")
-    print(f"  Bottlenecks (V/C > 1): {len(bottlenecks)}")
+    print(f"  Bottlenecks (V/C >= {vc_threshold}): {len(bottlenecks)}")
+    if len(bottlenecks) > 0:
+        print(bottlenecks.to_string(index=False))
 
     return {
         "VMT":            vmt,

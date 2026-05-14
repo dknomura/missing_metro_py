@@ -97,25 +97,24 @@ def sum_flow_field(dk: caliperpy.Gisdk, flow_bin: str, field: str) -> float:
     dk.CloseView(vw)
     return total
 
-
 def close_all_views(dk):
-    """
-    Close every open view in TransCAD so file locks are released.
-    Call this before deleting output files.
-    GetViews(None) returns [view_names_array, current_index, current_name].
-    """
     try:
-        view_info = dk.GetViews(None)
-        view_names = view_info[0]          # element 1 = array of view name strings
-        if view_names:
-            for vname in view_names:
-                try:
-                    dk.CloseView(vname)
-                except Exception:
-                    pass
-            print(f"  Closed {len(view_names)} open views")
-    except Exception:
+        views = dk.GetViews(None)[0] or []
+        closed = 0
+        for vw in (views or []):
+            # Skip internal TransCAD views
+            if vw.lower().startswith("table_"):
+                continue
+            try:
+                dk.CloseView(vw)
+                closed += 1
+            except:
+                pass
+        if closed:
+            print(f"  Closed {closed} open views")
+    except:
         pass
+
 
 def _delete_if_exists(path: str, dk=None):
     """Delete file + companion descriptor."""
@@ -127,30 +126,6 @@ def _delete_if_exists(path: str, dk=None):
                 print(f"  Deleted: {f}")
             except PermissionError:
                 print(f"  WARNING: could not delete {f} — still locked")
-
-def get_bottlenecks(dk, flow_bin: str, vc_threshold: float = 1.0) -> pd.DataFrame:
-    vw = dk.OpenTable("Bottlenecks", "FFB", [flow_bin, None])
-    all_fields, _ = dk.GetFields(vw, "All")
-    
-    # Use fields that actually exist in the flow table
-    fields = ["ID1", "AB_Flow", "BA_Flow", "AB_VOC", "BA_VOC",
-              "AB_Time", "BA_Time", "AB_VMT", "BA_VMT",
-              "AB_VHT", "BA_VHT", "Tot_VMT"]
-    fields = [f for f in fields if f in all_fields]
-
-    data = {}
-    for f in fields:
-        try:
-            data[f] = list(dk.GetDataVector(vw + "|", f, None))
-        except Exception:
-            data[f] = [None] * dk.GetRecordCount(vw, None)
-    dk.CloseView(vw)
-
-    df = pd.DataFrame(data)
-    df["max_VOC"] = df[["AB_VOC", "BA_VOC"]].max(axis=1)
-    bottlenecks = df[df["max_VOC"] > vc_threshold].copy()
-    bottlenecks = bottlenecks.sort_values("max_VOC", ascending=False)
-    return bottlenecks
 
 
 def get_dk(dk: caliperpy.Gisdk = None) -> caliperpy.Gisdk:
@@ -168,19 +143,17 @@ def get_dk(dk: caliperpy.Gisdk = None) -> caliperpy.Gisdk:
 
 
 def open_taz(dk, taz_bin: str = "taz.bin") -> str:
-    """
-    Close any stale TAZ views, then open taz.bin exactly once.
-    Returns the view name TransCAD assigned (always 'TAZ' on a clean open).
-    """
-    # Close everything so no :1 / :2 deduplication can happen
     view_info = dk.GetViews(None)
     if view_info and view_info[0]:
         for vname in view_info[0]:
+            if vname.lower().startswith("table_"):
+                continue
+            if vname.lower().startswith("flow_"):
+                continue
             try:
                 dk.CloseView(vname)
-            except Exception:
+            except:
                 pass
-
     taz_vw = dk.OpenTable("TAZ", "FFB", [os.path.join(MODEL_DIR, taz_bin), None])
     print(f"  TAZ view: '{taz_vw}'")
     return taz_vw

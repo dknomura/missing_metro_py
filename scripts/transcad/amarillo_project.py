@@ -23,6 +23,9 @@ import caliperpy
 
 from transcad.constants import MODEL_DIR
 from transcad.caliper_4_step_model import (
+    add_ie_ee_to_od,
+    apply_special_attractions,
+    apply_special_generators,
     run_cross_classification,
     run_attractions,
     run_balancing,
@@ -68,7 +71,6 @@ dk = get_dk()
 # FULL MODEL PIPELINE
 # ──────────────────────────────────────────────────────────────────────────────
 
-# %%
 def run_full_model(
         dk: caliperpy.Gisdk,
         scenario_label:      str   = "Baseline",
@@ -94,25 +96,25 @@ def run_full_model(
     print(f"{'='*60}")
     ts = str(int(time.time()))
     prod_base = os.path.splitext(prod_output)[0] if prod_output else "prod"
-    prod_output = f"{prod_base}_{scenario_label}_{ts}.bin"
+    prod_output = rf"ScriptOutput\{prod_base}_{scenario_label}_{ts}.bin"
     pa_base = os.path.splitext(pa_output)[0] if pa_output else "pa"
-    pa_output = f"{pa_base}_{scenario_label}_{ts}.bin"
+    pa_output = rf"ScriptOutput\{pa_base}_{scenario_label}_{ts}.bin"
     skim_base = os.path.splitext(skim_output)[0] if skim_output else "skim"
-    skim_output = f"{skim_base}_{scenario_label}_{ts}.mtx"
+    skim_output = rf"ScriptOutput\{skim_base}_{scenario_label}_{ts}.mtx"
     flow_base = os.path.splitext(flow_output)[0] if flow_output else "flow"
-    flow_output = f"{flow_base}_{scenario_label}_{ts}.bin"
+    flow_output = rf"ScriptOutput\{flow_base}_{scenario_label}_{ts}.bin"
     gravity_base = os.path.splitext(gravity_output)[0] if gravity_output else "grav"
     od_base      = os.path.splitext(od_output)[0]      if od_output      else "od"
-    gravity_output = f"{gravity_base}_{scenario_label}_{ts}.mtx"
-    od_output      = f"{od_base}_{scenario_label}_{ts}.mtx"
+    gravity_output = rf"ScriptOutput\{gravity_base}_{scenario_label}_{ts}.mtx"
+    od_output      = rf"ScriptOutput\{od_base}_{scenario_label}_{ts}.mtx"
 
     # ── Step 1: Trip Generation ───────────────────────────────────────────
     print("\n[1] Trip Generation")
-    close_all_views(dk)
     taz_vw = open_taz(dk, taz_bin=taz_bin)
     prods_file, prod_vw = run_cross_classification(
         dk, taz_vw, output_file=prod_output, taz_bin=taz_bin    
     )
+    apply_special_generators(dk, prod_vw, taz_vw)
 
     if prod_rate_scale is not None:
         print(f"  Scaling productions by {prod_rate_scale:.3f}")
@@ -120,13 +122,15 @@ def run_full_model(
             set_data_vector_scaled(dk, prod_vw + "|", field, prod_rate_scale)    
     
     run_attractions(dk, taz_vw)
+    apply_special_attractions(dk, taz_vw)
 
     if attr_coeff_scale is not None:
         print(f"  Scaling attractions by {attr_coeff_scale:.3f}")
         for field in ["HBW_A", "HBNW_A", "NHB_A", "TRUCKTAXI_A"]:
             set_data_vector_scaled(dk, taz_vw + "|", field, attr_coeff_scale)
-            
-    pa = run_balancing(dk, taz_vw, prod_vw, output_file=pa_output)
+
+    hold_method = "WeightedSum" if attr_coeff_scale else "HoldProductions"        
+    pa = run_balancing(dk, taz_vw, prod_vw, output_file=pa_output, hold_method=hold_method)
 
     # ── Step 2: Network & Skim ────────────────────────────────────────────
     print("\n[2] Network & Skim")
@@ -143,15 +147,31 @@ def run_full_model(
     od_file = run_pa2od(dk, grav,
                         output_file         = od_output,
                         occupancy_overrides = occupancy_overrides)
-
+    
+    add_ie_ee_to_od(dk, od_file)
+    if demand_multiplier != 1.0:
+        print(f"  Scaling OD demand by {demand_multiplier:.3f}")
+        od_matrix = dk.OpenMatrix(od_file, "True")
+        cores = dk.GetMatrixCoreNames(od_matrix)
+        for core in cores:
+            mc      = dk.CreateMatrixCurrency(od_matrix, core, None, None, None)
+            row_ids = dk.VectorToArray(dk.GetMatrixVector(mc, [["Index", "Row"]]))
+            for row_id in row_ids:
+                if row_id is None:
+                    continue
+                row_vec  = dk.VectorToArray(dk.GetMatrixVector(mc, [["Row", row_id]]))
+                scaled   = [v * demand_multiplier if v is not None else 0.0 
+                            for v in row_vec]
+                dk.SetMatrixVector(mc, dk.ArrayToVector(scaled), [["Row", row_id]])
     # ── Step 5: Traffic Assignment ────────────────────────────────────────
     print("\n[5] Traffic Assignment")
     results = run_assignment(
         dk, net, od_file,
         flow_output       = flow_output,
-        demand_multiplier = demand_multiplier,
     )
     results["scenario"] = scenario_label
+    close_all_views(dk)
+    
     return results
 
 
@@ -180,7 +200,6 @@ def task_1a_baseline(dk: caliperpy.Gisdk) -> dict:
 # TASK 1B — NO-BUILD FUTURE (20 % growth)
 # ──────────────────────────────────────────────────────────────────────────────
 
-# %%
 def task_1b_no_build(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
     print("\n\n===  TASK 1B: NO-BUILD FUTURE (20% growth)  ===")
 
@@ -225,41 +244,27 @@ def task_1b_no_build(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
 # TASK 1C — LANES NEEDED
 # ──────────────────────────────────────────────────────────────────────────────
 
-# %%
-def task_1c_lanes_needed(bottlenecks_df: pd.DataFrame,
-                         lanes_per_capacity: float = 1800.0) -> pd.DataFrame:
+def task_1c_lanes_needed(bottlenecks_df, lanes_per_capacity=1800.0):
     import math
     print("\n\n===  TASK 1C: LANES NEEDED AT BOTTLENECKS  ===")
-
     df = bottlenecks_df.copy()
 
     def extra_lanes(row):
-        ab_voc  = row.get("AB_VOC")  or 0
-        ba_voc  = row.get("BA_VOC")  or 0
-        ab_flow = row.get("AB_Flow") or 0
-        ba_flow = row.get("BA_Flow") or 0
-        # Derive capacity from flow / VOC
-        ab_cap = ab_flow / ab_voc if ab_voc > 0 else 0
-        ba_cap = ba_flow / ba_voc if ba_voc > 0 else 0
-        flow     = max(ab_flow, ba_flow)
-        capacity = max(ab_cap,  ba_cap)
-        if capacity == 0:
+        flow = row.get("Tot_Flow") or 0
+        voc  = row.get("Max_VOC")  or 0
+        if voc == 0:
             return None
+        capacity = flow / voc
         shortfall = flow - capacity
         return int(math.ceil(shortfall / lanes_per_capacity)) if shortfall > 0 else 0
 
     df["Extra_Lanes_Needed"] = df.apply(extra_lanes, axis=1)
-    show = [c for c in ["ID1", "AB_VOC", "BA_VOC", "AB_Flow", "BA_Flow",
-                         "AB_VMT", "BA_VMT", "Extra_Lanes_Needed"]
-            if c in df.columns]
-    print(df[show].head(20).to_string(index=False))
+    print(df.to_string(index=False))
     return df
-
 # ──────────────────────────────────────────────────────────────────────────────
 # TASK 3B — SENSITIVITY ANALYSIS
 # ──────────────────────────────────────────────────────────────────────────────
 
-# %%
 def task_3b_sensitivity(dk: caliperpy.Gisdk, baseline_vmt: float) -> pd.DataFrame:
     print("\n\n===  TASK 3B: SENSITIVITY ANALYSIS  ===")
     rows = []
@@ -268,14 +273,25 @@ def task_3b_sensitivity(dk: caliperpy.Gisdk, baseline_vmt: float) -> pd.DataFram
         dict(label="S1_ReduceProdRates_10pct",  prod_rate_scale=0.90),
         dict(label="S2_ReduceAttrCoeff_10pct",  attr_coeff_scale=0.90),
         dict(label="S3_HigherOccupancy",
-             occupancy_overrides={"HBNW": 1.6, "NHB": 1.8}),
-        dict(label="S4_Demand_10pct_Reduction", demand_multiplier=0.90),
+             occupancy_overrides={"HBW": 1.2, "HBNW": 1.4, "NHB": 1.7}),
+        dict(label="S4_Demand_10pct_Reduction", demand_multiplier=0.9),
     ]
+    future_bin = os.path.join(MODEL_DIR, "taz_future.bin")
+    if not os.path.exists(future_bin):
+        scale_taz_fields(
+            dk,
+            os.path.join(MODEL_DIR, "taz.bin"),
+            GROWTH_FIELDS_HH + GROWTH_FIELDS_EMP,
+            GROWTH,
+            future_bin,
+        )
+
 
     for t in tests:
         label = t.pop("label")
         res = run_full_model(
             dk,
+            taz_bin        = "taz_future.bin",
             scenario_label = label,
             prod_output    = f"{label}_Prod.bin",
             pa_output      = f"{label}_PA.bin",
@@ -303,7 +319,6 @@ def task_3b_sensitivity(dk: caliperpy.Gisdk, baseline_vmt: float) -> pd.DataFram
 # TASK 3C — COMBINED SCENARIO
 # ──────────────────────────────────────────────────────────────────────────────
 
-# %%
 def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
     print("\n\n===  TASK 3C: COMBINED SCENARIO (target VMT ≤ baseline)  ===")
 
@@ -317,11 +332,13 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
             future_bin,
         )
 
-    MAX_ITER   = 6
-    prod_scale = 0.85
-    attr_scale = 0.90
-    hbnw_occ   = 1.70
-    nhb_occ    = 2.00
+    MAX_ITER   = 10
+    prod_scale = 1
+    attr_scale = 1
+    hbw_occ   = 1.10
+    hbnw_occ   = 1.30
+    nhb_occ    = 1.50
+    demand_mult = 1.0
 
     res = {}
     for i in range(1, MAX_ITER + 1):
@@ -331,6 +348,7 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
 
         res = run_full_model(
             dk,
+            taz_bin        = "taz_future.bin",
             scenario_label      = label,
             prod_output         = f"{label}_Prod.bin",
             pa_output           = f"{label}_PA.bin",
@@ -340,7 +358,8 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
             flow_output         = f"{label}_Flow.bin",
             prod_rate_scale     = prod_scale,
             attr_coeff_scale    = attr_scale,
-            occupancy_overrides = {"HBNW": hbnw_occ, "NHB": nhb_occ},
+            demand_multiplier   = demand_mult,
+            occupancy_overrides = {"HBW": hbw_occ, "HBNW": hbnw_occ, "NHB": nhb_occ},
         )
 
         pct = (res["VMT"] - baseline_vmt) / baseline_vmt * 100
@@ -349,11 +368,12 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
         if res["VMT"] <= baseline_vmt:
             print(f"\n  ✓ Target achieved in iteration {i}!")
             break
-
-        prod_scale -= 0.05
-        attr_scale -= 0.05
-        hbnw_occ   += 0.10
-        nhb_occ    += 0.10
+        demand_mult -= 0.01  # scale down demand for next iteration
+        prod_scale -= 0.025
+        attr_scale -= 0.01
+        hbw_occ   += 0.01
+        hbnw_occ   += 0.01
+        nhb_occ    += 0.01
     else:
         print("\n  ✗ Target not met — reporting best result.")
 
@@ -361,15 +381,16 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
     return res
 
 # %%
-run_full_model(dk, scenario_label="DEV_Baseline_Test")
-    
-
+# %%
+# Quick test
+res = run_full_model(dk, scenario_label="test_dm")
 # %%
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
 
+# %%
 # %%
 def main():
     baseline     = task_1a_baseline(dk)
@@ -384,6 +405,8 @@ def main():
     print("\n\n" + "="*60)
     print("  FINAL SUMMARY")
     print("="*60)
+    print("\nLanes needed:")
+    print(lanes_df.to_string(index=False))
     for label, vmt, vht in [
         ("1A Baseline",          baseline_vmt,       baseline_vht),
         ("1B No-Build Future",   future["VMT"],       future["VHT"]),
