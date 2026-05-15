@@ -118,7 +118,7 @@ def run_full_model(
 
     if prod_rate_scale is not None:
         print(f"  Scaling productions by {prod_rate_scale:.3f}")
-        for field in ["HBW_P", "HBNW_P", "NHB_P", "TRUCKTAXI_P"]:
+        for field in ["HBW_P"]:
             set_data_vector_scaled(dk, prod_vw + "|", field, prod_rate_scale)    
     
     run_attractions(dk, taz_vw)
@@ -126,7 +126,7 @@ def run_full_model(
 
     if attr_coeff_scale is not None:
         print(f"  Scaling attractions by {attr_coeff_scale:.3f}")
-        for field in ["HBW_A", "HBNW_A", "NHB_A", "TRUCKTAXI_A"]:
+        for field in ["HBNW_A", "NHB_A"]:
             set_data_vector_scaled(dk, taz_vw + "|", field, attr_coeff_scale)
 
     hold_method = "WeightedSum" if attr_coeff_scale else "HoldProductions"        
@@ -271,10 +271,10 @@ def task_3b_sensitivity(dk: caliperpy.Gisdk, baseline_vmt: float) -> pd.DataFram
 
     tests = [
         dict(label="S1_ReduceProdRates_10pct",  prod_rate_scale=0.90),
-        dict(label="S2_ReduceAttrCoeff_10pct",  attr_coeff_scale=0.90),
+        dict(label="S2_ReduceAttrCoeff_10pct",  attr_coeff_scale=0.99),
         dict(label="S3_HigherOccupancy",
-             occupancy_overrides={"HBW": 1.2, "HBNW": 1.4, "NHB": 1.7}),
-        dict(label="S4_Demand_10pct_Reduction", demand_multiplier=0.9),
+             occupancy_overrides={"HBW": 1.2, "HBNW": 1.4, "NHB": 1.6}),
+        dict(label="S4_Demand_10pct_Reduction", demand_multiplier=0.97),
     ]
     future_bin = os.path.join(MODEL_DIR, "taz_future.bin")
     if not os.path.exists(future_bin):
@@ -334,10 +334,10 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
 
     MAX_ITER   = 10
     prod_scale = .99
-    attr_scale = .995
-    hbw_occ   = 1.10
-    hbnw_occ   = 1.30
-    nhb_occ    = 1.50
+    attr_scale = .9975
+    hbw_occ   = 1.1 * 1.05
+    hbnw_occ   = 1.3 * 1.05
+    nhb_occ    = 1.5 * 1.05
 
     res = {}
     for i in range(1, MAX_ITER + 1):
@@ -370,7 +370,7 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
             print("\n  ✗ Target not met — reporting best result.")
 
         prod_scale -= 0.01
-        attr_scale -= 0.005
+        attr_scale -= 0.0025
         hbw_occ   *= 1.05
         hbnw_occ   *= 1.05
         nhb_occ    *= 1.05

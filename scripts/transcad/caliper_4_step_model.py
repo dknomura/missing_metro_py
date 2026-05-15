@@ -204,13 +204,13 @@ def run_balancing(dk: caliperpy.Gisdk, taz_vw: str, prod_vw: str,
     obj.OutputFile = pa_file
 
     obj.AddPurpose({"Production": "HBW_P",       "Attraction": "HBW_A",
-                    "Method": hold_method})
+                    "Method": "HoldProductions"})
     obj.AddPurpose({"Production": "HBNW_P",      "Attraction": "HBNW_A",
                     "Method": hold_method})
     obj.AddPurpose({"Production": "NHB_P",       "Attraction": "NHB_A",
                     "Method": hold_method})
     obj.AddPurpose({"Production": "TRUCKTAXI_P", "Attraction": "TRUCKTAXI_A",
-                    "Method": hold_method})
+                    "Method": "HoldProductions"})
     ok = obj.Run()
     if not ok:
         raise RuntimeError("Generation.Balance failed.")
