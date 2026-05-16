@@ -370,7 +370,7 @@ def task_3c_combined(dk: caliperpy.Gisdk, baseline_vmt: float) -> dict:
             print("\n  ✗ Target not met — reporting best result.")
 
         prod_scale -= 0.01
-        attr_scale -= 0.0025
+        attr_scale -= 0.01
         hbw_occ   *= 1.05
         hbnw_occ   *= 1.05
         nhb_occ    *= 1.05
